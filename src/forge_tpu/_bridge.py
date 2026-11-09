@@ -99,21 +99,13 @@ def _in_place_or_raise(call, donated, key):
     _IN_PLACE.add(key)
     return out
 
-_LAUNCHES = {}                                                                                                                        # key (as _IN_PLACE's) -> (args, kwargs) of torch_tpu's C++ kernel launch, kept at the key's first call
+_LAUNCHES = {}                                                                                                                        # key (as _IN_PLACE's) -> (call_custom_kernel, args, kwargs) of torch_tpu's launch, kept at the key's first call
 
 def _launch(call, inputs, donated, key):
-    # runs the TPU update. The FIRST time for each key : call() (the jax_op, checked by _in_place_or_raise), while torch_tpu's C++ launch
-    # is caught and kept. Every later time : that launch is replayed with the new inputs [s, go, x, w, *states], which skips ~200 us of
-    # torch_tpu Python per layer (custom op dispatch + JaxCallable). call_custom_kernel is torch_tpu._internal (not a public API) : if
-    # its signature ever changes, the replay is dropped with a warning and call() is used again.
+    # the FIRST TPU update for each key (and every update of a key whose replay failed) : call() (the jax_op, checked by _in_place_or_raise),
+    # while torch_tpu's C++ launch is caught and kept in _LAUNCHES. Every later update replays that launch in fused_update with the new
+    # inputs [s, go, x, w, *states], which skips ~200 us of torch_tpu Python per layer (custom op dispatch + JaxCallable).
     from torch_tpu._internal.pallas import pallas
-    if key in _LAUNCHES:
-        args, kwargs = _LAUNCHES[key]
-        try: return pallas.tpu_torch_pallas.call_custom_kernel(*args, inputs = inputs, **kwargs)
-        except (TypeError, AttributeError) as error:
-            del _LAUNCHES[key]; _NO_REPLAY.add(key)
-            warnings.warn(f"FORGE: replaying torch_tpu's kernel launch failed ({error}); {key} goes through jax_op from now on (slower)")
-            return call()
     module, caught = pallas.tpu_torch_pallas, {}
     class _Catch:                                                                                                                     # stands in for torch_tpu's C++ module during call()
         def __getattr__(self, name): return getattr(module, name)
@@ -123,8 +115,18 @@ def _launch(call, inputs, donated, key):
     finally: pallas.tpu_torch_pallas = module
     seen = caught.get("kwargs", {}).get("inputs", [])
     if key not in _NO_REPLAY and len(seen) == len(inputs) and all(a.shape == b.shape and a.dtype == b.dtype for a, b in zip(seen, inputs)):
-        _LAUNCHES[key] = (caught["args"], {name: value for name, value in caught["kwargs"].items() if name != "inputs"})          # kept only if torch_tpu launched exactly our inputs
+        _LAUNCHES[key] = (module.call_custom_kernel, caught["args"], {name: value for name, value in caught["kwargs"].items() if name != "inputs"})   # kept only if torch_tpu launched exactly our inputs
     return out
+
+def _replay(launch, inputs, key, call):
+    # the kept launch with new inputs. call_custom_kernel is torch_tpu._internal (not a public API) : if its signature ever changes, the
+    # replay is dropped with a warning and this key goes through call() (the jax_op) from then on
+    function, args, kwargs = launch
+    try: return function(*args, inputs = inputs, **kwargs)
+    except (TypeError, AttributeError) as error:
+        del _LAUNCHES[key]; _NO_REPLAY.add(key)
+        warnings.warn(f"FORGE: replaying torch_tpu's kernel launch failed ({error}); {key} goes through jax_op from now on (slower)")
+        return call()
 
 _NO_REPLAY = set()                                                                                                                    # keys whose replay failed once
 
@@ -156,12 +158,16 @@ def fused_update(go2d, x2d, fusedStateObject, with_dx):
     scalars = kernel.OPTIMIZERS[fusedStateObject.optimizer_type].scalars(fusedStateObject.hparams, fusedStateObject.step)             # list of all scalars
     if w.device.type == "tpu":
         s, key = _device_scalars(tuple(scalars), w.device), (fusedStateObject.optimizer_type, fusedStateObject.state_mode, tuple(w.shape), w.dtype, tuple(go2d.shape), go2d.dtype, x2d.dtype)
-        inputs = [s, go2d.detach(), x2d.detach(), w.detach(), *flat]                                                                  # the kernel's tensors, in torch_tpu's launch order
-        out = _launch(lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, inputs[1:3], inputs[3], flat), inputs, [w, *flat], key)
+        inputs = [s, go2d, x2d, w, *flat]                                                                                             # the kernel's tensors, in torch_tpu's launch order (no detach : the backward runs without grad mode)
+        call = lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, [go2d.detach(), x2d.detach()], w.detach(), flat) # the jax_op way
+        launch = _LAUNCHES.get(key)
+        out = _replay(launch, inputs, key, call) if launch else _launch(call, inputs, [w, *flat], key)
+        _rebind(fusedStateObject, out)
+        _kick(out[0])                                                                                                                 # w's new value
+        return dx
     elif w.device.type == "cpu": out = [_to_torch(a) for a in _run(jnp.asarray(scalars, jnp.float32), [_to_jax(go2d), _to_jax(x2d)], _to_jax(w), [_to_jax(t) for t in flat], optimizer = fusedStateObject.optimizer_type, state_mode = fusedStateObject.state_mode, interpret = True)]
     else: raise RuntimeError(f"FusedLinear supports devices 'tpu' and 'cpu', got '{w.device}'")                                       #
     _rebind(fusedStateObject, out)                                                                                                    # make fusedStateObject point to the right data
-    if w.device.type == "tpu": _kick(fusedStateObject.weight)                                                                         #
     return dx
 
 

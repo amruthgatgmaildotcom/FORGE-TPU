@@ -2,8 +2,8 @@ import torch, torch.nn.functional as F
 from forge_tpu import _bridge
 
 #   Readme.md
-#     This file contains exactly one class for outsiders, FusedLinearFunction. it has nothing else for outsiders (_linear_backward and
-#     _apply_fused are internal). the class inherits from torch.autograd.Function, and we just have to define two staticmethods for it.
+#     This file contains exactly one class for outsiders, FusedLinearFunction. it has nothing else for outsiders (_linear_backward is
+#     internal). the class inherits from torch.autograd.Function, and we just have to define two staticmethods for it.
 #     'forward' and 'backward'. more details about it under the line 'class FusedLinearFunction(torch.autograd.Function):'
 
 
@@ -63,19 +63,9 @@ def _linear_backward(grad_output, x, weight, has_bias, needs_dx, fusedStateObjec
     go2d = grad_output.reshape(-1, grad_output.shape[-1])                                                                             # go2d is (BT, V) tensor, needed if user uses transformers
     x2d = x.reshape(-1, x.shape[-1])                                                                                                  # x2d is (BT, H) tensor, needed if user uses transformers
     grad_bias = go2d.sum(0) if has_bias else None                                                                                     # grad_bias is (V) tensor, needed if user uses transformers
-    dx = _apply_fused(go2d, x2d, fusedStateObject, needs_dx)                                                                          # 
+    fusedStateObject.increment_step()                                                                                                 # this layer's update count
+    dx = _bridge.fused_update(go2d.contiguous(), x2d.contiguous(), fusedStateObject, needs_dx)                                        # updates w and its state, returns dx
     return None if dx is None else dx.reshape(*grad_output.shape[:-1], -1), None, grad_bias                                           # 
 
 
 
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
-
-
-
-def _apply_fused(go2d, x2d, fusedStateObject, with_dx):
-    fusedStateObject.increment_step()                                                                                                 # 
-    return _bridge.fused_update(go2d.contiguous(), x2d.contiguous(), fusedStateObject, with_dx)                                       # fused_update returns dx 
-
-
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
