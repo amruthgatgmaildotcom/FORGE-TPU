@@ -31,7 +31,8 @@ backward) and the rest (activations and temporaries).
     PYTHONPATH=src python benchmarks/llama.py          every method x every sequence length, tables and figures
     PYTHONPATH=src python benchmarks/llama.py plot     only redraws them from the results.json files
 Knobs (environment variables): COMPILE_TORCH (1/0), SEQ_LENS (256,512,1024), WARMUP_STEPS (10), TIMED_STEPS (20),
-METHODS (";"-separated), OUT_DIR (benchmarks/llama_results), DEFER_AND_FUSE (1/0, eager only). LLAMA_TINY=1: a 2-layer, small-vocabulary model, only to
+METHODS (";"-separated), OUT_DIR (benchmarks/llama_results), DEFER_AND_FUSE (1/0, eager only), PROFILE_STEPS (0: after the timed steps, this many more
+steps are traced with torch_tpu's profiler into "trace <method>/" for xprof). LLAMA_TINY=1: a 2-layer, small-vocabulary model, only to
 check that the script runs (on a CPU too).
 """
 import json
@@ -57,7 +58,8 @@ def knobs():
             "warmup": int(env("WARMUP_STEPS", "10")), "timed": int(env("TIMED_STEPS", "20")),
             "methods": [m.strip() for m in env("METHODS", ";".join(ALL_METHODS)).split(";") if m.strip()],
             "out": Path(env("OUT_DIR", str(Path(__file__).resolve().parent / "llama_results"))),
-            "tiny": env("LLAMA_TINY", "0") == "1", "defer": env("DEFER_AND_FUSE", "1") == "1"}
+            "tiny": env("LLAMA_TINY", "0") == "1", "defer": env("DEFER_AND_FUSE", "1") == "1",
+            "profile": int(env("PROFILE_STEPS", "0"))}
 
 
 def mode_dir(k):
@@ -222,6 +224,20 @@ def run(method, seq, k):
         say(f"{tag} {phase:<13} {step_ms[-1]:9.1f} ms (host {issued_ms[-1]:7.1f})   loss {losses[-1]:7.4f}   "
             f"peak {step_peak[-1]:6.2f} GiB   held {step_held[-1]:6.2f} GiB")
 
+    if k["profile"] and on_tpu:  # extra steps after the timed ones, traced (TPU + host) for xprof: they change no timing
+        from torch_tpu._internal import profiler
+        trace = out_dir(k, seq) / f"trace {method}"
+        say(f"{tag} tracing {k['profile']} more steps into {trace} ...")
+        try:
+            with profiler.profile(activities=[profiler.ProfilerActivity.TPU, profiler.ProfilerActivity.CPU],
+                                  on_trace_ready=profiler.xprof_trace_handler(dir_name=str(trace))):
+                for _ in range(k["profile"]):
+                    loss_of(forward_model).backward()
+                    step_optimizer()
+                    optimizer.zero_grad(set_to_none=True)
+                    memory.sync()
+        except Exception as error:  # a failed trace must not lose the timed results
+            say(f"{tag} tracing failed ({type(error).__name__}: {str(error)[:200]}); the timed results are kept")
     moved = [(w.detach().to("cpu").float() - b).abs().max().item() for w, b in zip(watched, before)]
     fused = model.model.layers[0].self_attn.q_proj
     forge_steps = None  # which counter FORGE incremented: the Python int (eager path) or step_tensor (compiled path)
