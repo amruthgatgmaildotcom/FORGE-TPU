@@ -1,17 +1,19 @@
 """Which writes made inside a backward survive torch.compile(backend="tpu")?  One short run, one table.
 
 Each probe trains a tiny layer for 2 steps, eager and compiled, and compares the tensors that the backward writes.
-KEPT = compiled equals eager. LOST = compiled did not change them. Run on the TPU:
+KEPT = compiled equals eager. LOST = compiled did not change them. Each probe runs eager, compiled, and compiled with
+compiled autograd (the backward traced at run time as its own graph). "extra MiB" is the step's peak above what the TPU
+held before it (step 2). Run on the TPU:
 
     PYTHONPATH=src python benchmarks/probe_compile.py
 
 On a CPU (backend aot_eager) only probes 1-3 run: they check this script, not torch_tpu.
 """
-import torch, torch.nn as nn
+import contextlib, torch, torch.nn as nn
 
 ON_TPU = torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "tpu"
 DEV, BACKEND = ("tpu", "tpu") if ON_TPU else ("cpu", "aot_eager")
-BT, H, V, LR = 64, 256, 256, 1e-2
+BT, H, V, LR = 64, 1024, 1024, 1e-2
 
 
 # 1. plain torch writes in backward, into forward inputs (w, and m given to apply as a tensor)
@@ -84,7 +86,7 @@ class Layer(nn.Module):
         if self.probe == 2: self.count.add_(1); return x @ self.weight.t()
         if self.probe == 3: return OpFn.apply(x, self.weight, self.m)
         if self.probe == 4: return ForgeFn.apply(x, self.weight, self.m, self.v)
-        return self.fused(x)                                                                             # probe 5
+        return self.fused(x.to(self.fused.weight.dtype))                                                 # probe 5
 
 
 def make(probe):
@@ -105,19 +107,24 @@ def written(layer):
     return [layer.weight, layer.m] + ([layer.v] if layer.probe == 4 else [])
 
 
-def train(probe, compiled):
+def train(probe, mode):
     torch._dynamo.reset()
     layer = make(probe)
     before = [t.detach().float().cpu().clone() for t in written(layer)]
     ptrs = [t.data_ptr() for t in written(layer)]
-    run = torch.compile(layer, backend = BACKEND, fullgraph = True) if compiled else layer
+    run = layer if mode == "eager" else torch.compile(layer, backend = BACKEND, fullgraph = True)
+    backward_ctx = lambda: torch._dynamo.compiled_autograd._enable(torch.compile(backend = BACKEND, fullgraph = True)) if mode == "compiled autograd" else contextlib.nullcontext()
     x = torch.randn(BT, H, generator = torch.Generator().manual_seed(1)).to(DEV).requires_grad_()
-    for _ in range(2): run(x).float().sum().backward()
-    if ON_TPU: torch.accelerator.synchronize()
+    extra = 0.0
+    for _ in range(2):
+        if ON_TPU: torch.accelerator.synchronize(); held = torch.accelerator.memory_allocated(); torch.accelerator.reset_peak_memory_stats()
+        with backward_ctx(): run(x).float().sum().backward()
+        x.grad = None
+        if ON_TPU: torch.accelerator.synchronize(); extra = (torch.accelerator.max_memory_allocated() - held) / 2**20
     after = [t.detach().float().cpu() for t in written(layer)]
     moved = max((a - b).abs().max().item() for a, b in zip(after, before))
     same_ptr = all(t.data_ptr() == p for t, p in zip(written(layer), ptrs))
-    return after, moved, same_ptr
+    return after, moved, same_ptr, extra
 
 
 NAMES = {1: "plain torch writes in backward", 2: "buffer write in forward", 3: "custom_op(mutates_args), torch inside",
@@ -125,13 +132,16 @@ NAMES = {1: "plain torch writes in backward", 2: "buffer write in forward", 3: "
 
 if __name__ == "__main__":
     print(f"device {DEV}, backend {BACKEND}, torch {torch.__version__}")
-    print(f"{'probe':<48} {'eager moved':>12} {'compiled moved':>15} {'max |compiled - eager|':>23} {'same data_ptr':>14}  verdict")
+    print(f"{'probe':<48} {'mode':<18} {'moved':>10} {'max |x - eager|':>16} {'same data_ptr':>14} {'extra MiB':>10}  verdict")
     for probe in (1, 2, 3, 4, 5) if ON_TPU else (1, 2, 3):
-        try:
-            eager, eager_moved, _ = train(probe, False)
-            comp, comp_moved, same_ptr = train(probe, True)
-            diff = max((a - b).abs().max().item() for a, b in zip(comp, eager))
-            verdict = "LOST" if comp_moved == 0 else "KEPT" if diff <= 1e-2 * max(eager_moved, 1e-12) else "WRONG VALUES"
-            print(f"{probe}. {NAMES[probe]:<45} {eager_moved:12.3e} {comp_moved:15.3e} {diff:23.3e} {str(same_ptr):>14}  {verdict}")
-        except Exception as error:
-            print(f"{probe}. {NAMES[probe]:<45} ERROR {type(error).__name__}: {str(error).splitlines()[0][:200]}")
+        eager = None
+        for mode in ("eager", "compiled", "compiled autograd"):
+            try:
+                out, moved, same_ptr, extra = train(probe, mode)
+                if mode == "eager": eager, eager_moved, verdict, diff = out, moved, "reference", 0.0
+                else:
+                    diff = max((a - b).abs().max().item() for a, b in zip(out, eager))
+                    verdict = "LOST" if moved == 0 else "KEPT" if diff <= 1e-2 * max(eager_moved, 1e-12) else "WRONG VALUES"
+                print(f"{probe}. {NAMES[probe]:<45} {mode:<18} {moved:10.3e} {diff:16.3e} {str(same_ptr):>14} {extra:10.1f}  {verdict}")
+            except Exception as error:
+                print(f"{probe}. {NAMES[probe]:<45} {mode:<18} ERROR {type(error).__name__}: {str(error).splitlines()[0][:200]}")
