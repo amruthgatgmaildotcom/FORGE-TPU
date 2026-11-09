@@ -5,10 +5,7 @@ TORCH_TPU_DEFER_AND_FUSE=1, as the benchmark). Variants, the same layers and dat
     nn.Linear, no step      forward + backward only: the floor of torch's own host cost (it makes every dW, updates nothing)
     fused AdamW             nn.Linear, then torch.optim.AdamW(fused=True).step()
     FORGE (src)             FusedLinear as in src
-    FORGE lean update       _bridge.fused_update replaced (only in this file) by one with less Python: no detach() (the
-                            backward runs without grad mode), the update key cached per layer and go shape, the replay inline
-    FORGE lean update+bwd   and autograd's _linear_backward + _apply_fused merged into one function (fewer Python calls)
-    FORGE lean, no kick     lean update+bwd without _kick: what the kick costs on the host (and on the step)
+    FORGE (src), no kick    src with KICK_EVERY = 0: what the kick costs on the host, and what it saves on the step
 The FORGE variants must equal FORGE (src)'s weights and states bit for bit ("max |diff|" = 0).
 Per variant: step ms (median, after a sync), host ms (median, Python done), host us per FORGE layer above "nn.Linear, no
 step", TPU programs per step, peak GiB.
@@ -16,12 +13,11 @@ step", TPU programs per step, peak GiB.
     TORCH_TPU_DEFER_AND_FUSE=1 PYTHONPATH=src python benchmarks/probe_eager.py
 """
 import os, statistics, time, torch, torch.nn as nn
-from forge_tpu import _bridge, autograd, kernel
+from forge_tpu import _bridge
 
 DEPTH, SEQ, HIDDEN, MLP, LR, WARMUP, TIMED = 16, 512, 2048, 8192, 1e-4, 5, 30
 ON_TPU = torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "tpu"
 DEV = "tpu" if ON_TPU else "cpu"
-SRC_UPDATE, SRC_BACKWARD = _bridge.fused_update, autograd._linear_backward
 
 
 def programs():
@@ -31,35 +27,7 @@ def sync():
     if ON_TPU: torch.accelerator.synchronize()
 
 
-# ---- the lean variants (same arguments and results as src's functions) ----
-KEYS = {}                                                                                                # (id(state), go shape) -> src's update key
-KICK = [True]
-
-def update_lean(go2d, x2d, st, with_dx):
-    w = st.weight
-    dx = go2d @ w if with_dx else None                                                                   # FIRST, with the old w
-    launch = _bridge._LAUNCHES.get(KEYS.get((id(st), go2d.shape)))
-    if launch is None:                                                                                   # first call: src's way (checks and keeps the launch)
-        SRC_UPDATE(go2d, x2d, st, False)
-        KEYS[id(st), go2d.shape] = (st.optimizer_type, st.state_mode, tuple(w.shape), w.dtype, tuple(go2d.shape), go2d.dtype, x2d.dtype)
-        return dx
-    from torch_tpu._internal.pallas import pallas
-    s = _bridge._device_scalars(tuple(kernel.OPTIMIZERS[st.optimizer_type].scalars(st.hparams, st.step)), w.device)
-    args, kwargs = launch
-    out = pallas.tpu_torch_pallas.call_custom_kernel(*args, inputs = [s, go2d, x2d, w, *_bridge._flatten(st.buffers, st.optimizer_type)], **kwargs)
-    _bridge._rebind(st, out)
-    if KICK[0]: _bridge._kick(out[0])
-    return dx
-
-def backward_lean(grad_output, x, weight, has_bias, needs_dx, st):
-    go2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
-    x2d = x.reshape(-1, x.shape[-1]).contiguous()
-    st.step += 1                                                                                         # eager: the Python int (increment_step)
-    dx = _bridge.fused_update(go2d, x2d, st, needs_dx)
-    return None if dx is None else dx.reshape(*grad_output.shape[:-1], -1), None, go2d.sum(0) if has_bias else None
-
-VARIANTS = {"FORGE (src)": (SRC_UPDATE, SRC_BACKWARD, True), "FORGE lean update": (update_lean, SRC_BACKWARD, True),
-            "FORGE lean update+bwd": (update_lean, backward_lean, True), "FORGE lean, no kick": (update_lean, backward_lean, False)}
+VARIANTS = {"FORGE (src)": 1, "FORGE (src), no kick": 0}                                                 # name -> KICK_EVERY
 
 
 # ---- the model and one variant ----
@@ -76,7 +44,7 @@ def stack(fused):
 
 def run(name):
     fused = name.startswith("FORGE")
-    if fused: _bridge.fused_update, autograd._linear_backward, KICK[0] = VARIANTS[name]
+    if fused: _bridge.KICK_EVERY = VARIANTS[name]
     model = stack(fused)
     optimizer = torch.optim.AdamW(model.parameters(), lr = LR, fused = True) if name == "fused AdamW" else None
     x = torch.randn(SEQ, HIDDEN, generator = torch.Generator().manual_seed(1)).to(DEV, torch.bfloat16).requires_grad_()
@@ -94,7 +62,7 @@ def run(name):
         end = time.perf_counter()
         peak = torch.accelerator.max_memory_allocated() / 2**30 if ON_TPU else 0.0
         if step >= WARMUP: rows.append((1e3 * (end - start), 1e3 * (host - start), programs() - p0, peak))
-    _bridge.fused_update, autograd._linear_backward = SRC_UPDATE, SRC_BACKWARD
+    _bridge.KICK_EVERY = 1
     final = [t.detach().float().cpu() for l in model for t in [l.weight] + ([v for a in l.fusedStateObject.buffers.values() for v in a.values()] if fused else [])]
     return rows, final
 

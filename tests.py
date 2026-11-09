@@ -25,6 +25,9 @@ FORGE_HP = dict(lr = HP["lr"], beta1 = HP["betas"][0], beta2 = HP["betas"][1], e
 STEPS = 5
 SHAPES = [(256, 512, 128), (384, 640, 200)] + ([(2048, 8192, 512)] if ON_TPU else [])                    # (in H, out V, tokens BT)
 RESULTS = []
+torch.set_float32_matmul_precision("highest")                                                            # torch_tpu runs fp32 matmuls in bf16 by default
+# (torch_tpu precision.py : "On TPU, float32 matrix multiplications are natively executed in bfloat16"); FORGE's kernel uses
+# HIGHEST for fp32 (fused_grad.py), so the torch reference must too, or the comparison measures torch's rounding (TPU run 1)
 
 
 # ---- helpers ----
@@ -57,7 +60,8 @@ def pair(H, V, dtype, bias, state_mode = "bf16", seed = 0):
     fused = FusedLinear.from_linear(copy.deepcopy(ref), state_mode = state_mode, **FORGE_HP).to(DEV).train()
     ref_opt = torch.optim.AdamW(ref.parameters(), **HP, fused = True)
     bias_opt = torch.optim.AdamW([fused.bias], **HP, fused = True) if bias else None                   # FORGE leaves the bias to an optimizer
-    return ref, ref_opt, fused, bias_opt
+    sync()                                                                                                # run the deepcopy now: with defer and fuse it stays pending, and
+    return ref, ref_opt, fused, bias_opt                                                                  # torch's in-place AdamW on ref then breaks it (TPU run 1, see pending_clone)
 
 def data(BT, H, V, dtype, lead = (), seed = 1):
     g = torch.Generator().manual_seed(seed)
@@ -168,6 +172,20 @@ def bad_dtype():
 
 
 # ---- 3. TPU only: donation hazards, memory, torch.compile ----
+def pending_clone_torch_only():
+    # the same hazard without FORGE: a pending clone of a tensor that an in-place op then updates (torch_tpu donates in-place buffers)
+    if not ON_TPU: return skip("torch only: a pending clone() survives an in-place add_", "TPU only")
+    a = torch.randn(2048, 2048, generator = torch.Generator().manual_seed(2)).to(DEV)
+    sync()
+    before = host(a)
+    clone = a.clone()                                                                                     # issued, not run yet
+    try:
+        a.add_(1); sync()
+        same = torch.equal(host(clone), before)
+        check("torch only: a pending clone() survives an in-place add_", same, f"clone equals the old value: {same} (fails = torch_tpu, not FORGE)")
+    except Exception as error:
+        check("torch only: a pending clone() survives an in-place add_", False, f"{type(error).__name__}: {str(error).splitlines()[0][:90]} (torch_tpu, not FORGE)")
+
 def pending_clone():
     # a clone of w made before the update, not yet run, must still hold the old w after FORGE donated w's buffer
     if not ON_TPU: return skip("a pending clone() of w survives the update (donation)", "TPU only")
@@ -228,7 +246,7 @@ if __name__ == "__main__":
     cases = [lambda H = H, V = V, BT = BT, d = d, b = b, s = s: against_torch(H, V, BT, d, b, s)
              for (H, V, BT) in SHAPES for d in (torch.bfloat16, torch.float32) for s in ("bf16", "int8") for b in (False,)]
     cases += [lambda: against_torch(256, 512, 128, torch.bfloat16, True, "bf16"), lambda: against_torch(256, 512, 64, torch.bfloat16, False, "bf16", lead = (2,))]
-    cases += [eval_mode, from_linear_shares, no_input_grad, state_dict_roundtrip, int8_shape_check, bad_dtype, pending_clone, memory_without_sync, compiled]
+    cases += [eval_mode, from_linear_shares, no_input_grad, state_dict_roundtrip, int8_shape_check, bad_dtype, pending_clone_torch_only, pending_clone, memory_without_sync, compiled]
     for case in cases:
         try: case()
         except Exception as error:
