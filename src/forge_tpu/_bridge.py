@@ -5,7 +5,6 @@ from forge_tpu import kernel
 _TORCH = {"bfloat16": torch.bfloat16, "float32": torch.float32, "int8": torch.int8}
 _JAX = {torch_type: type_string for type_string, torch_type in _TORCH.items()}
 KICK_EVERY = 1                                                                                                                        # eager TPU : start the deferred work every KICK_EVERY updates, 0 : never (see _kick)
-FLUSH_BEFORE_LAUNCH = False                                                                                                           # TEMPORARY experiment (see _flush)
 
 
 
@@ -142,13 +141,6 @@ def _kick(w):
         from torch_tpu._internal import sync
         sync.synchronize([w], False)                                                                                                  # wait = False : materialize, do not block
 
-def _flush():
-    # starts ALL pending TPU work (without waiting) before the donating launch, so no pending reader of w or of a state (a lazy clone,
-    # a forward output nobody read yet) can run after its buffer was donated (tests.py, TPU: those fail with "Buffer has been deleted
-    # or donated", while torch's own in-place ops do not). TEMPORARY experiment: benchmarks/probe_donate.py picks the call form
-    from torch_tpu._internal import sync
-    sync.synchronize(wait = False)
-
 def fused_update(go2d, x2d, fusedStateObject, with_dx):
     # go2d (BT, V), x2d (BT, H) tensors. Updates w and its state in place, returns dx (BT, H) computed with the old w (or None)       #
     w = fusedStateObject.weight                                                                                                       #
@@ -169,7 +161,6 @@ def fused_update(go2d, x2d, fusedStateObject, with_dx):
         inputs = [s, go2d, x2d, w, *flat]                                                                                             # the kernel's tensors, in torch_tpu's launch order (no detach : the backward runs without grad mode)
         call = lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, [go2d.detach(), x2d.detach()], w.detach(), flat) # the jax_op way
         launch = _LAUNCHES.get(key)
-        if FLUSH_BEFORE_LAUNCH: _flush()
         out = _replay(launch, inputs, key, call) if launch else _launch(call, inputs, [w, *flat], key)
         _rebind(fusedStateObject, out)
         _kick(out[0])                                                                                                                 # w's new value

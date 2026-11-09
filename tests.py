@@ -56,12 +56,13 @@ def skip(name, why):
 def pair(H, V, dtype, bias, state_mode = "bf16", seed = 0):
     # the torch reference (nn.Linear + fused AdamW) and FORGE, from the same weights
     torch.manual_seed(seed)
-    ref = nn.Linear(H, V, bias = bias, dtype = dtype).to(DEV)
-    fused = FusedLinear.from_linear(copy.deepcopy(ref), state_mode = state_mode, **FORGE_HP).to(DEV).train()
+    host_ref = nn.Linear(H, V, bias = bias, dtype = dtype)                                               # made on the host, then moved twice: two buffers that
+    ref = copy.deepcopy(host_ref).to(DEV)                                                                 # share nothing (a deepcopy on the TPU can share w's buffer
+    fused = FusedLinear.from_linear(host_ref, state_mode = state_mode, **FORGE_HP).to(DEV).train()       # with ref until a write: TPU runs 1-2, see pending_clone)
     ref_opt = torch.optim.AdamW(ref.parameters(), **HP, fused = True)
     bias_opt = torch.optim.AdamW([fused.bias], **HP, fused = True) if bias else None                   # FORGE leaves the bias to an optimizer
-    sync()                                                                                                # run the deepcopy now: with defer and fuse it stays pending, and
-    return ref, ref_opt, fused, bias_opt                                                                  # torch's in-place AdamW on ref then breaks it (TPU run 1, see pending_clone)
+    sync()
+    return ref, ref_opt, fused, bias_opt
 
 def data(BT, H, V, dtype, lead = (), seed = 1):
     g = torch.Generator().manual_seed(seed)
@@ -194,12 +195,15 @@ def pending_clone():
     sync()
     before = host(fused.weight)
     clone = fused.weight.detach().clone()                                                                 # issued, not run yet
+    from torch_tpu._internal import sync as tpu_sync
+    how = (f"copy-on-write w/clone {torch._C._is_cow_tensor(fused.weight)}/{torch._C._is_cow_tensor(clone)}, clone materializing/materialized "
+           f"{tpu_sync.is_materializing(clone)}/{tpu_sync.is_materialized(clone)}")                      # how torch_tpu holds the clone before the update
     try:
         step(fused, None, x, dy); sync()
         same = torch.equal(host(clone), before)
-        check("a pending clone() of w survives the update (donation)", same, f"clone equals the old w: {same}")
+        check("a pending clone() of w survives the update (donation)", same, f"clone equals the old w: {same}; {how}")
     except Exception as error:
-        check("a pending clone() of w survives the update (donation)", False, f"{type(error).__name__}: {str(error).splitlines()[0][:90]}")
+        check("a pending clone() of w survives the update (donation)", False, f"{type(error).__name__}: {str(error).splitlines()[0][:60]}; {how}")
 
 def memory_without_sync():
     # N steps without a sync must not hold more memory than N steps with one (a sync after each step)
