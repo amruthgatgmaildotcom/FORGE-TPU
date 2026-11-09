@@ -9,8 +9,8 @@ A stack of DEPTH Llama-sized layers (2048 -> 8192 -> 2048 -> ...), bf16, batch 1
 The FORGE rows must equal FORGE (src)'s weights and states bit for bit ("max |diff|" = 0).
 Table 1, per step: total ms (after a sync), host ms (Python done), TPU programs (torch.tpu._get_cache_requests), peak GiB.
 Table 2, FORGE (src), per layer: the host time and programs of each piece, measured by wrapping the functions in this
-process (a piece contains the pieces indented below it; "rest" = the parent minus its listed pieces). The wrappers add
-a few us each to their parent's "rest".
+process, in a separate run (a piece contains the pieces indented below it; "rest" = the parent minus its listed pieces).
+The wrappers add a few us each to their parent's "rest"; Table 1's runs record nothing.
 Table 3, the host cost of single operations on a Llama-sized layer's tensors (mean over many calls, no wrappers).
 
     TORCH_TPU_DEFER_AND_FUSE=1 PYTHONPATH=src python benchmarks/probe_eager.py
@@ -95,7 +95,8 @@ def stack(fused):
         for l in model: l.fusedStateObject.ensure_buffers(l.weight)
     return model
 
-def run(method):
+def run(method, detail = False):
+    # detail : record Table 2's pieces (the wrappers then add their own cost to the host time, so Table 1 uses runs without)
     fused = method.startswith("FORGE")
     JAX_OP_ONLY[0] = method == "FORGE via jax_op"
     if fused: _bridge.fused_update = timed("fused_update", update_lean3 if method == "FORGE lean-3" else SRC_FUSED_UPDATE)
@@ -104,7 +105,7 @@ def run(method):
     x = torch.randn(SEQ, HIDDEN, generator = torch.Generator().manual_seed(1)).to(DEV, torch.bfloat16).requires_grad_()
     rows = []
     for step in range(WARMUP + TIMED):
-        RECORD[0] = method if fused and step >= WARMUP else None
+        RECORD[0] = method if detail and step >= WARMUP else None
         sync(); p0 = programs()
         if ON_TPU: torch.accelerator.reset_peak_memory_stats()
         start = time.perf_counter()
@@ -176,6 +177,7 @@ if __name__ == "__main__":
         diff = max((a - b).abs().max().item() for a, b in zip(final, reference)) if method.startswith("FORGE") else float("nan")
         med = lambda i: statistics.median(r[i] for r in rows)
         print(f"{method:<17} {med(0):9.2f} {med(1):8.2f} {med(2):14.1f} {max(r[3] for r in rows):9.3f} {diff:26.3e}", flush = True)
+    run("FORGE (src)", detail = True)                                                                    # Table 2: a separate, recorded run
     calls = TIMED * DEPTH
     mean = lambda name: (sum(t for t, _ in SPENT[("FORGE (src)", name)]) / calls / 1e3, sum(p for _, p in SPENT[("FORGE (src)", name)]) / calls)
     print(f"\nFORGE (src), per layer (mean over {calls} layer calls; a piece contains the pieces indented below it):")
