@@ -6,6 +6,8 @@ TORCH_TPU_DEFER_AND_FUSE=1, as the benchmark). Variants, the same layers and dat
     fused AdamW             nn.Linear, then torch.optim.AdamW(fused=True).step()
     FORGE (src)             FusedLinear as in src
     FORGE (src), no kick    src with KICK_EVERY = 0: what the kick costs on the host, and what it saves on the step
+    FORGE flush, no kick    FLUSH_BEFORE_LAUNCH = True (all pending work started before each launch), KICK_EVERY = 0
+    FORGE flush + kick      both
 The FORGE variants must equal FORGE (src)'s weights and states bit for bit ("max |diff|" = 0).
 Per variant: step ms (median, after a sync), host ms (median, Python done), host us per FORGE layer above "nn.Linear, no
 step", TPU programs per step, peak GiB.
@@ -27,7 +29,8 @@ def sync():
     if ON_TPU: torch.accelerator.synchronize()
 
 
-VARIANTS = {"FORGE (src)": 1, "FORGE (src), no kick": 0}                                                 # name -> KICK_EVERY
+VARIANTS = {"FORGE (src)": (1, False), "FORGE (src), no kick": (0, False), "FORGE flush, no kick": (0, True),
+            "FORGE flush + kick": (1, True)}                                                             # name -> (KICK_EVERY, FLUSH_BEFORE_LAUNCH)
 
 
 # ---- the model and one variant ----
@@ -44,7 +47,7 @@ def stack(fused):
 
 def run(name):
     fused = name.startswith("FORGE")
-    if fused: _bridge.KICK_EVERY = VARIANTS[name]
+    if fused: _bridge.KICK_EVERY, _bridge.FLUSH_BEFORE_LAUNCH = VARIANTS[name]
     model = stack(fused)
     optimizer = torch.optim.AdamW(model.parameters(), lr = LR, fused = True) if name == "fused AdamW" else None
     x = torch.randn(SEQ, HIDDEN, generator = torch.Generator().manual_seed(1)).to(DEV, torch.bfloat16).requires_grad_()
@@ -62,12 +65,16 @@ def run(name):
         end = time.perf_counter()
         peak = torch.accelerator.max_memory_allocated() / 2**30 if ON_TPU else 0.0
         if step >= WARMUP: rows.append((1e3 * (end - start), 1e3 * (host - start), programs() - p0, peak))
-    _bridge.KICK_EVERY = 1
+    _bridge.KICK_EVERY, _bridge.FLUSH_BEFORE_LAUNCH = 1, False
     final = [t.detach().float().cpu() for l in model for t in [l.weight] + ([v for a in l.fusedStateObject.buffers.values() for v in a.values()] if fused else [])]
     return rows, final
 
 
 if __name__ == "__main__":
+    if os.environ.get("FORGE_FLUSH_FORM"):                                                               # the form probe_donate.py found (default: _bridge's)
+        from torch_tpu._internal import sync
+        _bridge._flush = {"synchronize(wait=False)": lambda: sync.synchronize(wait = False), "synchronize(False)": lambda: sync.synchronize(False),
+                          "synchronize([], False)": lambda: sync.synchronize([], False)}[os.environ["FORGE_FLUSH_FORM"]]
     print(f"device {DEV}, torch {torch.__version__}, TORCH_TPU_DEFER_AND_FUSE={os.environ.get('TORCH_TPU_DEFER_AND_FUSE', 'not set')}, "
           f"KICK_EVERY={_bridge.KICK_EVERY}, {DEPTH} layers ({HIDDEN} <-> {MLP}), {SEQ} tokens, bf16, {WARMUP} warmup + {TIMED} timed steps")
     names = ["nn.Linear, no step", "fused AdamW", *VARIANTS] if ON_TPU else ["nn.Linear, no step", "fused AdamW", "FORGE (src)"]
