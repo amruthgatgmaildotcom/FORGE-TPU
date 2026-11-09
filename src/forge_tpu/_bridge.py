@@ -4,7 +4,7 @@ from forge_tpu import kernel
 
 _TORCH = {"bfloat16": torch.bfloat16, "float32": torch.float32, "int8": torch.int8}
 _JAX = {torch_type: type_string for type_string, torch_type in _TORCH.items()}
-KICK_EVERY = 1                                                                                                                        # eager TPU : start the deferred work every KICK_EVERY updates (see _kick)
+KICK_EVERY = 1                                                                                                                        # eager TPU : start the deferred work every KICK_EVERY updates, 0 : never (see _kick)
 
 
 
@@ -135,7 +135,7 @@ def _kick(w):
     # FORGE's backward otherwise stays deferred until the step's sync, so the TPU idles while Python runs the backward (Llama-3.2-1B,
     # v5e, seq 512 : 135.9 -> 88.1 ms per step with KICK_EVERY = 1 ; 7 : 109.3, 28 : 97.4). torch_tpu._internal (not a public API)
     _KICKS[0] += 1
-    if _KICKS[0] % KICK_EVERY == 0:
+    if KICK_EVERY and _KICKS[0] % KICK_EVERY == 0:
         from torch_tpu._internal import sync
         sync.synchronize([w], False)                                                                                                  # wait = False : materialize, do not block
 
