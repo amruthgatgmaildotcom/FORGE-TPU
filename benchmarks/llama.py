@@ -21,7 +21,7 @@ the TPU held during any timed step. "host ms" is when Python had handed the whol
 
 COMPILE_TORCH=1: the model (forward + its backward) and optimizer.step() are each compiled with torch.compile(backend="tpu"),
 for every method. The model with fullgraph=True: anything that cannot be traced is an error, never a silent eager fallback.
-"FORGE steps eager / compiled" in the diagnostics says which path FORGE's update really took (its two step counters). COMPILE_TORCH=0: eager, in TorchTPU's optimized eager mode (TORCH_TPU_DEFER_AND_FUSE=1), as for Qwen.
+"FORGE steps eager / compiled" in the diagnostics says which path FORGE's update really took (its two step counters). COMPILE_TORCH=0: eager, in TorchTPU's optimized eager mode (TORCH_TPU_DEFER_AND_FUSE=1), as for Qwen; with DEFER_AND_FUSE=0 in plain eager (results in eager_plain/).
 
 Memory, besides the peak: every step's own peak and what it leaves behind, and one more step (not timed) followed
 layer by layer, always EAGER (a sync after every layer cannot happen inside a compiled program): it shows where the
@@ -31,7 +31,7 @@ backward) and the rest (activations and temporaries).
     PYTHONPATH=src python benchmarks/llama.py          every method x every sequence length, tables and figures
     PYTHONPATH=src python benchmarks/llama.py plot     only redraws them from the results.json files
 Knobs (environment variables): COMPILE_TORCH (1/0), SEQ_LENS (256,512,1024), WARMUP_STEPS (10), TIMED_STEPS (20),
-METHODS (";"-separated), OUT_DIR (benchmarks/llama_results). LLAMA_TINY=1: a 2-layer, small-vocabulary model, only to
+METHODS (";"-separated), OUT_DIR (benchmarks/llama_results), DEFER_AND_FUSE (1/0, eager only). LLAMA_TINY=1: a 2-layer, small-vocabulary model, only to
 check that the script runs (on a CPU too).
 """
 import json
@@ -57,11 +57,15 @@ def knobs():
             "warmup": int(env("WARMUP_STEPS", "10")), "timed": int(env("TIMED_STEPS", "20")),
             "methods": [m.strip() for m in env("METHODS", ";".join(ALL_METHODS)).split(";") if m.strip()],
             "out": Path(env("OUT_DIR", str(Path(__file__).resolve().parent / "llama_results"))),
-            "tiny": env("LLAMA_TINY", "0") == "1"}
+            "tiny": env("LLAMA_TINY", "0") == "1", "defer": env("DEFER_AND_FUSE", "1") == "1"}
+
+
+def mode_dir(k):
+    return "compiled" if k["compile"] else "eager" if k["defer"] else "eager_plain"
 
 
 def out_dir(k, seq):
-    return k["out"] / ("compiled" if k["compile"] else "eager") / f"seq_{seq}"
+    return k["out"] / mode_dir(k) / f"seq_{seq}"
 
 
 def say(*parts):
@@ -235,7 +239,7 @@ def run(method, seq, k):
               "states_gib": gib(optimizer_states(torch, model, optimizer)), "dw_gib": dw_gib,
               "warmup_ms": step_ms[:k["warmup"]], "step_ms": step_ms[k["warmup"]:], "issued_ms": issued_ms[k["warmup"]:],
               "step_peak_gib": step_peak, "step_held_gib": step_held, "losses": losses, "weights_moved": moved,
-              "graph_breaks": breaks, "forge_steps": forge_steps}
+              "graph_breaks": breaks, "forge_steps": forge_steps, "defer_and_fuse": os.environ.get("TORCH_TPU_DEFER_AND_FUSE") == "1"}
 
     # one more step, eager, cut layer by layer (with a compiled run, FORGE's step count lives on the device: copy it over)
     say(f"{tag} one more step, eager, followed layer by layer (memory figure) ...")
@@ -319,7 +323,7 @@ def versions(torch):
 
 def run_everything():
     k = knobs()
-    say(f"FORGE-TPU / Llama-3.2-1B: {'torch.compile' if k['compile'] else 'eager (optimized: defer and fuse)'}, "
+    say(f"FORGE-TPU / Llama-3.2-1B: {'torch.compile' if k['compile'] else 'eager (optimized: defer and fuse)' if k['defer'] else 'eager (plain)'}, "
         f"sequence lengths {k['seq_lens']}, {k['warmup']} warmup + {k['timed']} timed steps, methods {k['methods']}")
     everything_started = time.perf_counter()
     for seq in k["seq_lens"]:
@@ -339,7 +343,7 @@ def run_one(method, seq, k, folder):
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     src = str(Path(__file__).resolve().parent.parent / "src")
     env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    if not k["compile"]:
+    if not k["compile"] and k["defer"]:
         env["TORCH_TPU_DEFER_AND_FUSE"] = "1"  # optimized eager, the same for every method (as for Qwen)
     else:
         env.pop("TORCH_TPU_DEFER_AND_FUSE", None)
@@ -409,7 +413,7 @@ def report(results, folder):
     ok = [r for r in rows if "error" not in r]
     first = ok[0] if ok else {}
     chip, seq = first.get("chip", "TPU"), (rows[0]["seq"] if rows else "?")
-    mode = "torch.compile" if first.get("compiled") else "eager (defer and fuse)"
+    mode = "torch.compile" if first.get("compiled") else "eager (defer and fuse)" if first.get("defer_and_fuse", True) else "eager (plain)"
     lines = [f"Single-chip comparison on {chip}, Llama-3.2-1B (random weights), batch {BATCH}, sequence {seq}, BF16 "
              f"everywhere, {mode}; step time is the median of {first.get('timed', '?')} steps.", "",
              "| Method | Peak (GiB) | Step (ms) | TF/s | Trains? (loss, step 1 → last) |", "|---|:--:|:--:|:--:|:--:|"]
@@ -610,7 +614,7 @@ def summary(k):
         lines.append(f"| {r['seq']} | {r['method']} | " + (f"{r['error']} | | | |" if "error" in r else
                      f"{r['peak_gib']:.2f} | {r['step']:.1f} ± {r['step_sd']:.1f} | {r['tflops']:.1f} | "
                      f"{r['losses'][0]:.3f} → {r['losses'][-1]:.3f} |"))
-    folder = k["out"] / ("compiled" if k["compile"] else "eager")
+    folder = k["out"] / mode_dir(k)
     (folder / "summary.md").write_text("\n".join(lines) + "\n")
     say("\n" + "\n".join(lines))
     plt = pyplot()
