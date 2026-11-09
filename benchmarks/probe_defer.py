@@ -1,7 +1,8 @@
 """Why does FORGE do more TPU work with TORCH_TPU_DEFER_AND_FUSE=1?  One layer, the update alone.
 
 One Llama MLP-sized layer (w 8192 x 2048 bf16, bf16 states), go (512, 8192), x (512, 2048), fixed. Measured:
-  1. TPU ms per update: N FORGE updates (_bridge.fused_update, no dx) and then one sync, against N fused-AdamW updates of
+  1. TPU ms per update: N FORGE updates (_bridge.fused_update, no dx) and then one sync (after the same N once untimed,
+     so a deferred program of N updates is compiled before the timing), against N fused-AdamW updates of
      the same weight (dW = go.T @ x, then torch.optim.AdamW(fused=True).step()). Also the peak memory above what was
      held before (an in-place update adds ~0; a copy of w + states adds ~96 MiB).
   2. With defer and fuse only: the deferred program (StableHLO) that one FORGE update makes, from
@@ -29,6 +30,8 @@ def layer():
 
 def timed(update, n):
     update(); sync()                                                                                     # first call: compiles, checks, keeps the launch
+    for _ in range(n): update()                                                                          # the same n updates once untimed: with defer and fuse they are
+    sync()                                                                                               # one deferred program, compiled here and not in the timed run
     held = mib(); torch.accelerator.reset_peak_memory_stats()
     start = time.perf_counter()
     for _ in range(n): update()
@@ -46,7 +49,8 @@ if __name__ == "__main__":
     def forge_update():
         with torch.no_grad(): st.increment_step(); _bridge.fused_update(go, x, st, False)
 
-    weight = torch.nn.Parameter(fused.weight.detach().clone())
+    weight = torch.nn.Parameter(torch.randn(V, H, generator = torch.Generator().manual_seed(3)).to("tpu", torch.bfloat16))   # its own buffer: a clone of
+                                                                                                         # fused.weight broke when FORGE donated it (TPU run 1)
     adamw = torch.optim.AdamW([weight], lr = LR, fused = True)
     def adamw_update():
         with torch.no_grad(): weight.grad = go.t() @ x
