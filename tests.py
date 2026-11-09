@@ -187,41 +187,46 @@ def pending_clone_torch_only():
     except Exception as error:
         check("torch only: a pending clone() survives an in-place add_", False, f"{type(error).__name__}: {str(error).splitlines()[0][:90]} (torch_tpu, not FORGE)")
 
-def pending_clone():
-    # a clone of w made before the update, not yet run, must still hold the old w after FORGE donated w's buffer
-    if not ON_TPU: return skip("a pending clone() of w survives the update (donation)", "TPU only")
-    _, _, fused, _ = pair(2048, 8192, torch.bfloat16, False)
-    x, dy = data(512, 2048, 8192, torch.bfloat16)
-    sync()
-    before = host(fused.weight)
-    clone = fused.weight.detach().clone()                                                                 # issued, not run yet
-    from torch_tpu._internal import sync as tpu_sync
-    how = (f"copy-on-write w/clone {torch._C._is_cow_tensor(fused.weight)}/{torch._C._is_cow_tensor(clone)}, clone materializing/materialized "
-           f"{tpu_sync.is_materializing(clone)}/{tpu_sync.is_materialized(clone)}")                      # how torch_tpu holds the clone before the update
-    try:
-        step(fused, None, x, dy); sync()
-        same = torch.equal(host(clone), before)
-        check("a pending clone() of w survives the update (donation)", same, f"clone equals the old w: {same}; {how}")
-    except Exception as error:
-        check("a pending clone() of w survives the update (donation)", False, f"{type(error).__name__}: {str(error).splitlines()[0][:60]}; {how}")
+def use_count(t):
+    return torch._C._storage_Use_Count(t.untyped_storage()._cdata)
 
-def memory_without_sync():
-    # N steps without a sync must not hold more memory than N steps with one (a sync after each step)
-    if not ON_TPU: return skip("memory: 20 steps without sync vs with sync", "TPU only")
-    peaks = []
-    for synced in (True, False):
+COPIES = {"clone()": lambda w: w.clone(), "empty_like().copy_()": lambda w: torch.empty_like(w).copy_(w),
+          "clone() then add_(0) on it": lambda w: w.clone().add_(0), "host copy (.cpu())": lambda w: w.cpu()}
+
+def copies_of_w():
+    # a copy of w made before an update must still hold the old w after FORGE donated w's buffer. clone() is the check (FAIL if
+    # broken); the other ways are reported (INFO), with the storage use count of w before / after the copy (can FORGE see sharing?)
+    if not ON_TPU: return skip("a clone() of w survives the update (donation)", "TPU only")
+    for name, make in COPIES.items():
         _, _, fused, _ = pair(2048, 8192, torch.bfloat16, False)
         x, dy = data(512, 2048, 8192, torch.bfloat16)
-        step(fused, None, x, dy); sync()
-        held = torch.accelerator.memory_allocated(); torch.accelerator.reset_peak_memory_stats()
-        for _ in range(20):
-            step(fused, None, x, dy)
-            if synced: sync()
+        step(fused, None, x, dy); sync()                                                                  # the first update: compiled, checked, launch kept
+        before, count = host(fused.weight), use_count(fused.weight)
+        copy_of_w = make(fused.weight.detach())
+        how = f"w storage use count {count} -> {use_count(fused.weight)}"
+        try:
+            step(fused, None, x, dy); sync()
+            same, detail = torch.equal(host(copy_of_w), before), ""
+        except Exception as error:
+            same, detail = False, f"{type(error).__name__}: {str(error).splitlines()[0][:50]}; "
+        report = f"{detail}copy equals the old w: {same}; {how}"
+        if name == "clone()": check("a clone() of w survives the update (donation)", same, report)
+        else: info(f"copy of w by {name} survives the update", report)
+
+def memory_without_sync():
+    # steps without a sync must not pile up memory: the peak of 40 such steps must equal the peak of 10
+    if not ON_TPU: return skip("memory: 40 vs 10 steps without sync (no growth)", "TPU only")
+    _, _, fused, _ = pair(2048, 8192, torch.bfloat16, False)
+    x, dy = data(512, 2048, 8192, torch.bfloat16)
+    step(fused, None, x, dy); sync()
+    peaks = []
+    for n in (10, 40):
+        sync(); held = torch.accelerator.memory_allocated(); torch.accelerator.reset_peak_memory_stats()
+        for _ in range(n): step(fused, None, x, dy)
         sync(); peaks.append((torch.accelerator.max_memory_allocated() - held) / 2**20)
-        del fused
     layer = 3 * 8192 * 2048 * 2 / 2**20                                                                   # w + m + v
-    check("memory: 20 steps without sync vs with sync", peaks[1] <= peaks[0] + layer / 2,
-          f"peak above held: synced {peaks[0]:.0f} MiB, not synced {peaks[1]:.0f} MiB (one layer's w+m+v = {layer:.0f} MiB)")
+    check("memory: 40 vs 10 steps without sync (no growth)", peaks[1] <= peaks[0] + 16,
+          f"peak above held: 10 steps {peaks[0]:.0f} MiB, 40 steps {peaks[1]:.0f} MiB (limit +16 MiB; one layer's w+m+v = {layer:.0f} MiB)")
 
 def compiled():
     # torch.compile(backend="tpu") must give the same weights as eager
@@ -250,7 +255,7 @@ if __name__ == "__main__":
     cases = [lambda H = H, V = V, BT = BT, d = d, b = b, s = s: against_torch(H, V, BT, d, b, s)
              for (H, V, BT) in SHAPES for d in (torch.bfloat16, torch.float32) for s in ("bf16", "int8") for b in (False,)]
     cases += [lambda: against_torch(256, 512, 128, torch.bfloat16, True, "bf16"), lambda: against_torch(256, 512, 64, torch.bfloat16, False, "bf16", lead = (2,))]
-    cases += [eval_mode, from_linear_shares, no_input_grad, state_dict_roundtrip, int8_shape_check, bad_dtype, pending_clone_torch_only, pending_clone, memory_without_sync, compiled]
+    cases += [eval_mode, from_linear_shares, no_input_grad, state_dict_roundtrip, int8_shape_check, bad_dtype, pending_clone_torch_only, copies_of_w, memory_without_sync, compiled]
     for case in cases:
         try: case()
         except Exception as error:
