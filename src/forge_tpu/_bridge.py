@@ -1,4 +1,4 @@
-import functools, jax, torch, warnings
+import functools, jax, os, torch, warnings
 import jax.numpy as jnp
 from forge_tpu import kernel
 
@@ -127,6 +127,16 @@ def _launch(call, inputs, donated, key):
 
 _NO_REPLAY = set()                                                                                                                    # keys whose replay failed once
 
+_KICK = {"every": int(os.environ.get("FORGE_KICK_EVERY", "0")), "count": 0}                                                            # TEMPORARY experiment (default off)
+
+def _kick(w):
+    # with TORCH_TPU_DEFER_AND_FUSE, starts the deferred work up to this update on the TPU every N updates, without waiting.
+    # TPU trace : without it FORGE's backward stays deferred until the step's sync, so the TPU idles while Python runs the backward
+    _KICK["count"] += 1
+    if _KICK["count"] % _KICK["every"] == 0:
+        from torch_tpu._internal import sync
+        sync.synchronize([w], False)                                                                                                  # wait = False : materialize, do not block
+
 def fused_update(go2d, x2d, fusedStateObject, with_dx):
     # go2d (BT, V), x2d (BT, H) tensors. Updates w and its state in place, returns dx (BT, H) computed with the old w (or None)       #
     w = fusedStateObject.weight                                                                                                       #
@@ -146,6 +156,7 @@ def fused_update(go2d, x2d, fusedStateObject, with_dx):
         s, key = _device_scalars(tuple(scalars), w.device), (fusedStateObject.optimizer_type, fusedStateObject.state_mode, tuple(w.shape), w.dtype, tuple(go2d.shape), go2d.dtype, x2d.dtype)
         inputs = [s, go2d.detach(), x2d.detach(), w.detach(), *flat]                                                                  # the kernel's tensors, in torch_tpu's launch order
         out = _launch(lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, inputs[1:3], inputs[3], flat), inputs, [w, *flat], key)
+        if _KICK["every"]: _rebind(fusedStateObject, out); _kick(fusedStateObject.weight); return dx
     elif w.device.type == "cpu": out = [_to_torch(a) for a in _run(jnp.asarray(scalars, jnp.float32), [_to_jax(go2d), _to_jax(x2d)], _to_jax(w), [_to_jax(t) for t in flat], optimizer = fusedStateObject.optimizer_type, state_mode = fusedStateObject.state_mode, interpret = True)]
     else: raise RuntimeError(f"FusedLinear supports devices 'tpu' and 'cpu', got '{w.device}'")                                       #
     _rebind(fusedStateObject, out)                                                                                                    # make fusedStateObject point to the right data
