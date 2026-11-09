@@ -1,4 +1,4 @@
-import functools, jax, torch
+import functools, jax, torch, warnings
 import jax.numpy as jnp
 from forge_tpu import kernel
 
@@ -54,7 +54,10 @@ def _to_torch(jaxArray):
 
 def _rebind(fusedStateObject, out):
     with torch.no_grad(): fusedStateObject.weight.set_(out[0])                                                                        # this function is to make fusedStateObject
-    fusedStateObject.buffers = _unflatten(out[1:], fusedStateObject.buffers, fusedStateObject.optimizer_type)                         # point at the right data
+    new = iter(out[1:])                                                                                                               # point at the right data. The state dict is updated in place,
+    for state_string in kernel.OPTIMIZERS[fusedStateObject.optimizer_type].states:                                                    # in _flatten's order (no new dict per call)
+        arrays = fusedStateObject.buffers[state_string]
+        for stringg in arrays: arrays[stringg] = next(new)
 
 
 
@@ -81,7 +84,7 @@ _COMPILED_OPS = {}                                                              
 def _device_scalars(values, device):
     return torch.tensor(values, dtype = torch.float32, device = device)                                                               #
 
-_IN_PLACE = set()                                                                                                                     # (optimizer, state_mode, w shape and dtype, go shape) whose update was seen in place
+_IN_PLACE = set()                                                                                                                     # (optimizer, state_mode, w shape and dtype, go shape and dtype, x dtype) whose update was seen in place
 
 def _in_place_or_raise(call, donated, key):
     # runs call() (the TPU update). The FIRST time for each key only : if XLA copied a donated tensor (w or a state) instead of writing into
@@ -94,6 +97,35 @@ def _in_place_or_raise(call, donated, key):
     if extra >= limit: raise RuntimeError(f"FORGE update {key} was NOT in place on HBM: the TPU's peak memory grew by {extra / 2**20:.1f} MiB during it (w + states are {sum(t.nbytes for t in donated) / 2**20:.1f} MiB), so XLA copied a donated buffer instead of writing into it")
     _IN_PLACE.add(key)
     return out
+
+_LAUNCHES = {}                                                                                                                        # key (as _IN_PLACE's) -> (args, kwargs) of torch_tpu's C++ kernel launch, kept at the key's first call
+
+def _launch(call, inputs, donated, key):
+    # runs the TPU update. The FIRST time for each key : call() (the jax_op, checked by _in_place_or_raise), while torch_tpu's C++ launch
+    # is caught and kept. Every later time : that launch is replayed with the new inputs [s, go, x, w, *states], which skips ~200 us of
+    # torch_tpu Python per layer (custom op dispatch + JaxCallable). call_custom_kernel is torch_tpu._internal (not a public API) : if
+    # its signature ever changes, the replay is dropped with a warning and call() is used again.
+    from torch_tpu._internal.pallas import pallas
+    if key in _LAUNCHES:
+        args, kwargs = _LAUNCHES[key]
+        try: return pallas.tpu_torch_pallas.call_custom_kernel(*args, inputs = inputs, **kwargs)
+        except (TypeError, AttributeError) as error:
+            del _LAUNCHES[key]; _NO_REPLAY.add(key)
+            warnings.warn(f"FORGE: replaying torch_tpu's kernel launch failed ({error}); {key} goes through jax_op from now on (slower)")
+            return call()
+    module, caught = pallas.tpu_torch_pallas, {}
+    class _Catch:                                                                                                                     # stands in for torch_tpu's C++ module during call()
+        def __getattr__(self, name): return getattr(module, name)
+        def call_custom_kernel(self, *args, **kwargs): caught.update(args = args, kwargs = kwargs); return module.call_custom_kernel(*args, **kwargs)
+    pallas.tpu_torch_pallas = _Catch()
+    try: out = _in_place_or_raise(call, donated, key)
+    finally: pallas.tpu_torch_pallas = module
+    seen = caught.get("kwargs", {}).get("inputs", [])
+    if key not in _NO_REPLAY and len(seen) == len(inputs) and all(a.shape == b.shape and a.dtype == b.dtype for a, b in zip(seen, inputs)):
+        _LAUNCHES[key] = (caught["args"], {name: value for name, value in caught["kwargs"].items() if name != "inputs"})          # kept only if torch_tpu launched exactly our inputs
+    return out
+
+_NO_REPLAY = set()                                                                                                                    # keys whose replay failed once
 
 def fused_update(go2d, x2d, fusedStateObject, with_dx):
     # go2d (BT, V), x2d (BT, H) tensors. Updates w and its state in place, returns dx (BT, H) computed with the old w (or None)       #
@@ -111,8 +143,9 @@ def fused_update(go2d, x2d, fusedStateObject, with_dx):
         return dx
     scalars = kernel.OPTIMIZERS[fusedStateObject.optimizer_type].scalars(fusedStateObject.hparams, fusedStateObject.step)             # list of all scalars
     if w.device.type == "tpu":
-        s, key = _device_scalars(tuple(scalars), w.device), (fusedStateObject.optimizer_type, fusedStateObject.state_mode, tuple(w.shape), w.dtype, tuple(go2d.shape))
-        out = _in_place_or_raise(lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, [go2d.detach(), x2d.detach()], w.detach(), flat), [w, *flat], key)
+        s, key = _device_scalars(tuple(scalars), w.device), (fusedStateObject.optimizer_type, fusedStateObject.state_mode, tuple(w.shape), w.dtype, tuple(go2d.shape), go2d.dtype, x2d.dtype)
+        inputs = [s, go2d.detach(), x2d.detach(), w.detach(), *flat]                                                                  # the kernel's tensors, in torch_tpu's launch order
+        out = _launch(lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, inputs[1:3], inputs[3], flat), inputs, [w, *flat], key)
     elif w.device.type == "cpu": out = [_to_torch(a) for a in _run(jnp.asarray(scalars, jnp.float32), [_to_jax(go2d), _to_jax(x2d)], _to_jax(w), [_to_jax(t) for t in flat], optimizer = fusedStateObject.optimizer_type, state_mode = fusedStateObject.state_mode, interpret = True)]
     else: raise RuntimeError(f"FusedLinear supports devices 'tpu' and 'cpu', got '{w.device}'")                                       #
     _rebind(fusedStateObject, out)                                                                                                    # make fusedStateObject point to the right data
