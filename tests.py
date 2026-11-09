@@ -214,19 +214,25 @@ def copies_of_w():
         else: info(f"copy of w by {name} survives the update", report)
 
 def memory_without_sync():
-    # steps without a sync must not pile up memory: the peak of 40 such steps must equal the peak of 10
-    if not ON_TPU: return skip("memory: 40 vs 10 steps without sync (no growth)", "TPU only")
-    _, _, fused, _ = pair(2048, 8192, torch.bfloat16, False)
-    x, dy = data(512, 2048, 8192, torch.bfloat16)
-    step(fused, None, x, dy); sync()
-    peaks = []
-    for n in (10, 40):
-        sync(); held = torch.accelerator.memory_allocated(); torch.accelerator.reset_peak_memory_stats()
-        for _ in range(n): step(fused, None, x, dy)
-        sync(); peaks.append((torch.accelerator.max_memory_allocated() - held) / 2**20)
-    layer = 3 * 8192 * 2048 * 2 / 2**20                                                                   # w + m + v
-    check("memory: 40 vs 10 steps without sync (no growth)", peaks[1] <= peaks[0] + 16,
-          f"peak above held: 10 steps {peaks[0]:.0f} MiB, 40 steps {peaks[1]:.0f} MiB (limit +16 MiB; one layer's w+m+v = {layer:.0f} MiB)")
+    # steps without a sync must not pile up memory: FORGE's growth from 10 to 40 such steps must not exceed torch's own (nn.Linear +
+    # fused AdamW, the same layer and data); in plain eager the host runs ahead of the TPU, so queued steps hold some buffers alive
+    if not ON_TPU: return skip("memory: 40 vs 10 steps without sync, growth vs torch", "TPU only")
+    growth = {}
+    for name in ("FORGE", "torch"):
+        ref, ref_opt, fused, _ = pair(2048, 8192, torch.bfloat16, False)
+        layer, opt = (fused, None) if name == "FORGE" else (ref, ref_opt)
+        x, dy = data(512, 2048, 8192, torch.bfloat16)
+        step(layer, opt, x, dy); sync()
+        peaks = []
+        for n in (10, 40):
+            sync(); held = torch.accelerator.memory_allocated(); torch.accelerator.reset_peak_memory_stats()
+            for _ in range(n): step(layer, opt, x, dy)
+            sync(); peaks.append((torch.accelerator.max_memory_allocated() - held) / 2**20)
+        growth[name] = peaks
+        del ref, ref_opt, fused, layer, opt; sync()
+    f, t = growth["FORGE"], growth["torch"]
+    check("memory: 40 vs 10 steps without sync, growth vs torch", f[1] - f[0] <= max(t[1] - t[0], 0) + 16,
+          f"peak above held, 10 -> 40 steps: FORGE {f[0]:.0f} -> {f[1]:.0f} MiB, torch {t[0]:.0f} -> {t[1]:.0f} MiB (limit: FORGE's growth <= torch's + 16 MiB)")
 
 def compiled():
     # torch.compile(backend="tpu") must give the same weights as eager
