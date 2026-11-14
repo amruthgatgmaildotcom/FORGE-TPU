@@ -1,4 +1,4 @@
-import itertools, json, math, os, statistics, sys, time, torch
+import itertools, json, math, os, sys, time, torch
 import jax.numpy as jnp
 from forge_tpu import _bridge, kernel
 
@@ -13,7 +13,7 @@ MODELS = {"mlp":   (4096, {(16384, 4096): 8, (4096, 16384): 8, (4096, 4096): 1})
 BV, BH, BBT = (512, 1024, 2048), (512, 1024, 2048), (512, 1024, 2048)  # every combination is tried (cut to the layer : bv <= V, bh <= H, bbt <= BT)
 DEFAULT = kernel._utils.DEFAULT_TILES
 VMEM = 64 * 2**20                                                      # the kernel's limit (kernel/_utils.py compiler_params). A triple that needs more (rough count, see fits) is not tried
-REPS, WARM = 5, 2                                                      # ms of a triple = median of REPS updates, after WARM updates (the first one compiles)
+REPS, WARM = 5, 2                                                      # ms of a triple = REPS updates in a row / REPS, after WARM updates (the first one compiles)
 MAX_SECONDS, INT8_SHARE = float(os.environ.get("MAX_SECONDS", 200)), 0.2   # per model. bf16 states get 1 - INT8_SHARE of it, then int8 states : only the default and the best bf16 triple
 OUT = os.environ.get("RESULTS", "results")
 
@@ -44,17 +44,20 @@ def update(scalars, go, x, w, flat, mode, tiles):
     out = _bridge._run(jnp.asarray(scalars, jnp.float32), [_bridge._to_jax(go), _bridge._to_jax(x)], _bridge._to_jax(w), [_bridge._to_jax(t) for t in flat], optimizer = "adamw", state_mode = mode, interpret = True, tiles = tiles)
     return [_bridge._to_torch(a) for a in out]                         # cpu : interpret mode, only to test this file without a TPU
 
+def read(w):
+    # torch_tpu only queues a fused update : it runs when something needs its result. Reading one value of the last w runs every update before it (each w is the input of the next)
+    sync(); return w[0, 0].item()
+
 def time_tiles(go, x, w0, mode, tiles):
-    # ms of one fused update (median of REPS), or the error text if these tiles do not compile / run
+    # ms of one fused update (REPS updates in a row, then one read, / REPS), or the error text if these tiles do not compile / run
     opt = kernel.OPTIMIZERS["adamw"]
     try:
         w = w0.clone()
-        flat, times = _bridge._flatten(_bridge.allocate_state(w, "adamw", mode), "adamw"), []
-        for step in range(1, WARM + REPS + 1):
-            sync(); t0 = time.perf_counter()
-            w, *flat = update(opt.scalars(opt.defaults, step), go, x, w, flat, mode, tiles)
-            sync(); times.append((time.perf_counter() - t0) * 1e3)
-        return statistics.median(times[WARM:])
+        flat = _bridge._flatten(_bridge.allocate_state(w, "adamw", mode), "adamw")
+        for step in range(1, WARM + 1): w, *flat = update(opt.scalars(opt.defaults, step), go, x, w, flat, mode, tiles)
+        read(w); t0 = time.perf_counter()                              # the compile and the warm updates are done here
+        for step in range(WARM + 1, WARM + REPS + 1): w, *flat = update(opt.scalars(opt.defaults, step), go, x, w, flat, mode, tiles)
+        read(w); return (time.perf_counter() - t0) * 1e3 / REPS
     except Exception as error: return f"{type(error).__name__}: {str(error)[:200]}"
 
 def measure(name):
