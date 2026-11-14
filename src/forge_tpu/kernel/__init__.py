@@ -18,4 +18,3 @@ def state_arrays(optimizer, state_mode, V, H, dtype):
     codec.check(V, V)
     return {state_string: codec.arrays(V, H, jnp.dtype(dtype)) for state_string in opt.states}
 
-

@@ -3,11 +3,12 @@ import torch.nn.functional as F
 from forge_tpu.autograd import FusedLinearFunction
 from forge_tpu.state import FusedOptimizerState
 
-
-
-
-
-
+#   Readme.md 
+#      when we say loss.backward() it triggers some tensors, autograd and nn.Linear ultimately. so to achieve FORGE we must make our own nn.Linear (call it FusedLinear)
+#      This layer class works exactly like nn.Linear but it also needs the optimizer details (this is my design choice).
+#      it also has a class called from_linear which steals/shares with already existing nn.Linear object and modifies it to be a FusedLinear
+#      while i am writing this, for simplicity only torch.blfloat and torch.float32 are allowed for parameters and v5e only does math on max 16 bit numbers natively
+#      although 32 bit floats can be broken into 2 and used for states, right now only state types allowed are bf16 and int8 (+ fp32 quantized)
 
 
 
@@ -68,20 +69,3 @@ class FusedLinear(nn.Module):
 
 
 
-
-
-## ================ module.py ================ ##
-# 
-# 
-# This file contains class definiton of FusedLinear(nn.Module). FusedLinear is a direct replacement of nn.Linear
-# The class stores layer specific optimizer paramenters, state_mode ("bf16"/"int8"), in and out_features, bias (bool)
-# 
-#       0. __init__(in_features, out_features, bias: bool = False, dtype = torch.bfloat16, state_mode = "bf16", optimizer_type = "adamw", **optimizer_kwargs):
-#             The constructor initializes parameters exactly like how nn.Linear does.
-#             Right now for simplicity, FusedLinear class allows param type to be only fp32 or bf16, the MXU cannot multiply
-#             32 bit numbers (v5e-) but outputs proper fp32 which can be cut down to bf16 without duplicating (gate level).
-#
-#       1. FusedLinear.from_linear(nn.Linear, state_mode = "bf16", optimizer_type = "adamw", **optimizer_kwargs):   (for now, for the benchmarks)
-#             This classmethod internally declares a meta FusedLinear, and then points towards the already existing 
-#             data of nn.Linear and returns the class.
-#             error is raised if state_mode not in ("bf16", "int8"). TPU v5e-1 only supports these both.

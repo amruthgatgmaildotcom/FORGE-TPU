@@ -5,13 +5,10 @@ from forge_tpu.kernel import OPTIMIZERS
 #   Readme.md
 #     This file has only one class to offer to outsiders, FusedOptimizerState. constructor needs to know the "optimizer_type", "state_mode", **hparams (default if not given)
 #     each FusedLinear layer has its own FusedOptimizerState object, which holds everything about the optimizer specific to that layer. 
-#     if we create state matrices inside the contructor of FusedLinear
-
-
-
-
-
-
+#     if we create state matrices inside the contructor of FusedLinear, and then when we do .to(device) states wont be moved to device. we could have tried initializing 
+#     states as register_buffers or nn.Parameter(requires_grad = False) and worked it out, but lets modularize everything related to a layer's optimizer into one class .
+#     We init states directly on the device during the first forward pass (that is what even pytorch does), and hence the method ensure_buffers (buffers is the word used
+#     state matrices here)
 
 
 

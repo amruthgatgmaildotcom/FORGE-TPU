@@ -6,8 +6,8 @@ from . import _utils
 #   Readme.md
 #     This file contains exactly two functions meant to be called from outside this file (_kernel and _epilouge are internal). the first one is fused_grad. This function takes in
 #     full matrices (2d jax arrays) of size ~ H/V/BT and updates the weight and state matrices exactly like its discussed in the FORGE research paper.
+#     The other one is optimizer_only, and this function assumes that dLoss/dw matrix is materialzed fully and passed. as of now it has not been used anywhere.
 
-# comback here LATER
 
 
 
