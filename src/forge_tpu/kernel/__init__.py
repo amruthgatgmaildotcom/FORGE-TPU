@@ -1,10 +1,10 @@
 import jax.numpy as jnp
 from ._utils import lookup
 from .codecs import CODECS
-from .fused_grad import fused_grad, optimizer_only
+from .fused_grad import fused_grad
 from .optimizers import OPTIMIZERS
 
-__all__ = ["fused_grad", "optimizer_only", "OPTIMIZERS", "CODECS", "state_arrays"]
+__all__ = ["fused_grad", "OPTIMIZERS", "CODECS", "state_arrays"]
 
 
 

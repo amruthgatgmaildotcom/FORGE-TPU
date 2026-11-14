@@ -2,13 +2,13 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 
 #   Readme.md
-#     This file has one purpose, it is exclusively to maintain classes of how we want to store state variables. when i am writing this the file has two of the, int8 and Plain.
+#     This file has one purpose, it is exclusively to maintain classes of how we want to store state variables. when i am writing this the file has two of them, int8 and Plain.
 #     Plain stores each state variable in bf16 form, int8 stores it as int8 + fp32 (exact concept can be checked on internet). To write another class in future ....
-#          1.  @staticmethod def arrays(V, H, dtype)      |   return a {"state_variable" : {"s1": ((size_x, size_y), dtype, init_fill), ...}, ...}
+#          1.  @staticmethod def arrays(V, H, dtype)      |   the arrays of ONE state variable : return a {"s1": ((size_x, size_y), dtype, init_fill), ...}
 #          2.  @staticmethod def check(V, bv)             |   raise errors if needed
-#          3.  @staticmethod def specs(bv, bh)            |   return a {"state_variable" : {"s1": pl.BlockSpec((bv, bh), lambda mapping), ...}, ...}
-#          4.  @staticmethod def decode(refs, floor)      |   better understood by reading int8.decode 
-#          5.  @staticmethod def encode(state, out)       |   better understood by reading int8.encode   ....   hence the name of the file, encoding-decoding => codecs.py
+#          3.  @staticmethod def specs(bv, bh)            |   their blocks, same keys : return a {"s1": pl.BlockSpec((bv, bh), lambda mapping), ...}
+#          4.  @staticmethod def decode(refs, floor)      |   refs is {"s1": ref, ...} of one tile, return the state tile in fp32 (floor : see optimizers.py). better understood by reading int8.decode
+#          5.  @staticmethod def encode(state, out)       |   the reverse, writes the fp32 tile into out {"s1": ref, ...}. better understood by reading int8.encode   ....   hence the name of the file, encoding-decoding => codecs.py
 #          6.  Finally there is a dictionary at the very end of this file named CODECS, update the new class over there also
 #   
 

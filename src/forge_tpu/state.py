@@ -1,4 +1,3 @@
-import torch
 from forge_tpu import _bridge
 from forge_tpu.kernel import OPTIMIZERS
 
@@ -50,31 +49,25 @@ class FusedOptimizerState:
         self.optimizer_type, self.state_mode = optimizer_type, state_mode                                                           # 
         self.hparams = {**defaults, **hparams}                                                                                      # merging dictionaries, values of hparams over writes defaults if keys clash
         self.step, self.weight, self.buffers = 0, None, None                                                                        # weight and buffers : see ensure_buffers
-        self.step_tensor = None                                                                                                     # the step count under torch.compile, see increment_step
 
     def ensure_buffers(self, weight):
         # binds the weight and allocates the space on HBM for the optimizer states (once), self.buffers become {str : {str : tensor, }, }
         if self.buffers is None:
             self.weight, self.buffers = weight, _bridge.allocate_state(weight, self.optimizer_type, self.state_mode)
-            self.step_tensor = torch.full((), float(self.step), dtype = torch.float32, device = weight.device)
 
     def increment_step(self):                                                                                                       #
-        # we also maintain how many times this layer has been updated. Eager : the Python int. Under torch.compile a Python int would only
-        # be incremented once (while tracing), so there the count is step_tensor, on device, incremented inside the compiled program
-        if torch.compiler.is_compiling(): self.step_tensor.add_(1)
-        else: self.step += 1
+        # we also maintain how many times this layer has been updated (AdamW needs it for the bias correction, see optimizers.py)
+        self.step += 1
 
     def state_dict(self):                                                                                                           # how to save state, we need to copy bacck to host to save on disk
-        step = self.step if self.step_tensor is None else max(self.step, int(self.step_tensor.item()))                              # whichever counted (eager or compiled)
-        return {"optimizer_type": self.optimizer_type, "state_mode": self.state_mode, "step": step, "buffers": _map(self.buffers, lambda tensoR: tensoR.to("cpu", copy = True))}
+        return {"optimizer_type": self.optimizer_type, "state_mode": self.state_mode, "step": self.step, "buffers": _map(self.buffers, lambda tensoR: tensoR.to("cpu", copy = True))}
 
     def load_state_dict(self, d):                                                       
         # call ensure_buffers(layer.weight) first : the weight decides the device the buffers go to
         if self.weight is None: raise RuntimeError("bind the weight first: fusedStateObject.ensure_buffers(layer.weight), then load_state_dict(d)")
         if (d["optimizer_type"], d["state_mode"]) != (self.optimizer_type, self.state_mode): raise ValueError(f"state is for ({d['optimizer_type']}, {d['state_mode']}), this layer uses ({self.optimizer_type}, {self.state_mode})")
         self.step = d["step"]
-        if self.step_tensor is not None: self.step_tensor.fill_(float(self.step))
-        # Through the host, for the same reason: never share a buffer with the caller's tensors.
+        # Through the host (as in state_dict) : the layer must never share a buffer with the caller's tensors, the update gives its buffers away (donation, see _bridge._rebind)
         self.buffers = _map(d["buffers"], lambda tensoR: tensoR.to("cpu", copy = True).to(self.weight.device))
 
     def __getattr__(self, name):

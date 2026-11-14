@@ -1,6 +1,6 @@
 import gc, math, os, re, torch, torch.nn as nn, torch.nn.functional as F
 from forge_tpu import FusedLinear
-import llama
+import llama as L
 
 # FORGE correctness : every check compares FORGE with PyTorch. The reference is PyTorch on CPU in fp32 / fp64 (assumed correct).
 # As in FORGE (dk4248) tests/test_correctness.py : one AdamW step from a non-zero state (step 5), the same (BT, V, H) shapes, the same tolerances.
@@ -131,16 +131,15 @@ def train(model, opt, data, steps):
     w0, losses = snap(), []
     for step in range(steps):
         x, y = data[step % len(data)]
-        loss = F.cross_entropy(model(x).flatten(0, 1).float(), y.flatten()); loss.backward()
+        loss = L.loss_fn(model(x), y); loss.backward()
         opt.step(); opt.zero_grad(set_to_none = True); losses.append(loss.item())
         if step == 0: w1 = snap()
     return w0, w1, snap(), losses
 
 
 def model_check(steps = 30):
-    # a small Llama (llama.py's model) trained with the four methods on the TPU, against torch.optim.AdamW on CPU in fp32 from the same init.
+    # a small Llama (llama.py's model : transformers' LlamaForCausalLM with small numbers) trained with the four methods on the TPU, against torch.optim.AdamW on CPU in fp32 from the same init.
     # bf16 training is never exact, so FORGE passes if its error is at most BASE x the larger error of PyTorch's own bf16 AdamW (vanilla, fused)
-    L = llama
     L.V, L.D, L.FF, L.LAYERS, L.HEADS, L.KV_HEADS, L.SEQ, L.ACTIVE, L.DEVICE = 4096, 512, 1536, 2, 8, 2, 256, 256, DEVICE
     L.HD = L.D // L.HEADS
     data = L.make_data()

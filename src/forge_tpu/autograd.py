@@ -5,6 +5,10 @@ from forge_tpu import _bridge
 #     This file contains exactly one class for outsiders, FusedLinearFunction. it has nothing else for outsiders (_linear_backward is
 #     internal). the class inherits from torch.autograd.Function, and we just have to define two staticmethods for it.
 #     'forward' and 'backward'. more details about it under the line 'class FusedLinearFunction(torch.autograd.Function):'
+#
+#   NOT DONE HERE (Dikshant's autograd.py does it, doable on TPU) : gradient accumulation. On a micro-step he materializes dw = go.T @ x, adds it to a pending buffer and
+#   does not update. On the last micro-step he adds the pending buffer and updates with an optimizer-only kernel (the commented optimizer_only in
+#   kernel/fused_grad.py). Here every backward is one update. (the full dw exists in HBM while accumulating, so that path saves no memory)
 
 
 
@@ -62,7 +66,7 @@ def _linear_backward(grad_output, x, weight, has_bias, needs_dx, fusedStateObjec
     # we have to return in this order only : dx for next layer, dw of this layer (None), db of this layer (if not None else None)
     go2d = grad_output.reshape(-1, grad_output.shape[-1])                                                                             # go2d is (BT, V) tensor, needed if user uses transformers
     x2d = x.reshape(-1, x.shape[-1])                                                                                                  # x2d is (BT, H) tensor, needed if user uses transformers
-    grad_bias = go2d.sum(0) if has_bias else None                                                                                     # grad_bias is (V) tensor, needed if user uses transformers
+    grad_bias = go2d.sum(0) if has_bias else None                                                                                     # grad_bias is (V) tensor, only if the layer has a bias (FORGE does not update it)
     fusedStateObject.increment_step()                                                                                                 # this layer's update count
     dx = _bridge.fused_update(go2d.contiguous(), x2d.contiguous(), fusedStateObject, needs_dx)                                        # updates w and its state, returns dx
     return None if dx is None else dx.reshape(*grad_output.shape[:-1], -1), None, grad_bias                                           # 
