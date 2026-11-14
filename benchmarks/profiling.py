@@ -159,8 +159,26 @@ def host_groups(P, title, path):
     fig.suptitle(f"{title} : what Python / PyTorch does on the host in each phase", x = 0.01, ha = "left", fontsize = 14, fontweight = "bold")
     fig.tight_layout(rect = (0, 0.1, 1, 1)); fig.savefig(path, dpi = 200); plt.close(fig)
 
+def simple(P, title):
+    # the short form : one row per phase, one column per method (ms)
+    names = list(P); o = {n: P[n]["overlapped"] for n in names}; s = {n: P[n]["split"] for n in names}
+    row = lambda label, f: f"| {label} | " + " | ".join(f(n) for n in names) + " |"
+    rows = [f"### {title} : where the time of one step goes (ms, median of {STEPS} steps)", "", "| | " + " | ".join(LABELS[n] for n in names) + " |", "|---|" + ":--:|" * len(names),
+            "| **Sync after each phase** |" + " |" * len(names),
+            row("Forward", lambda n: f"{s[n]['forward']['done']:.1f}"),
+            row("Backward : Python returns", lambda n: f"{s[n]['backward']['host']:.1f}"),
+            row("Backward : TPU finishes", lambda n: f"{s[n]['backward']['done']:.1f}"),
+            row("Optimizer step", lambda n: f"{s[n]['step']['done']:.1f}"),
+            row("Total", lambda n: f"{sum(s[n][p]['done'] for p in PHASES):.1f}"),
+            "| **As the benchmark (one sync at the end)** |" + " |" * len(names),
+            row("Python done issuing", lambda n: f"{o[n]['step']:.1f}"),
+            row("Step time (TPU done)", lambda n: f"**{o[n]['done']:.1f}**"),
+            row("of which FORGE Python", lambda n: f"{o[n]['forge python']:.1f}" if P[n]["forge_updates"] else "-"),
+            row("FORGE updates per step", lambda n: str(P[n]["forge_updates"]) if P[n]["forge_updates"] else "-")]
+    return "\n".join(rows)
+
 def table(P, title):
-    rows = [f"### {title} : profile (median of {STEPS} steps, after {WARMUP} warmup steps)", "",
+    rows = [simple(P, title), "", f"### {title} : profile in detail (median of {STEPS} steps, after {WARMUP} warmup steps)", "",
             "| Method | Step as benchmark (ms) | Python done issuing (ms) | Forward : Python / TPU done | Backward : Python / TPU done | Step : Python / TPU done | FORGE Python (ms) |",
             "|---|:--:|:--:|:--:|:--:|:--:|:--:|"]
     for n, r in P.items():

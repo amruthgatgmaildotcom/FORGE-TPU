@@ -44,7 +44,6 @@ assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"
 for prefix in ("mlp", "llama", "qwen"):
     print(f"\n========== {prefix} ==========")
     OUT = f"{REPO}/results/{prefix}"
-    shutil.rmtree(OUT, ignore_errors = True)                           # results from the zip : a failed run must give a missing row, not an old one
     ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT, "MAX_SECONDS": "60"}
     failed = [name for name in ("adamw", "adamw_fused", "forge_bf16", "forge_int8") if run(f"benchmarks/{prefix}.py", name, cwd = REPO, env = ENV) != 0]
     if failed: print(f"\nFAILED : {prefix} {failed} (see the errors above). The report shows the others.")

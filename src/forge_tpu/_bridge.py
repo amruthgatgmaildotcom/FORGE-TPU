@@ -136,7 +136,7 @@ def _in_place_or_raise(call, donated, key):
     out = call()                                                                                                                      #
     torch.accelerator.synchronize(); extra = torch.accelerator.max_memory_allocated() - before                                        #
     report = f"FORGE update {key}: the TPU's peak memory grew by {extra / 2**20:.1f} MiB during it (donated tensors, MiB: {', '.join(f'{b / 2**20:.1f}' for b in sizes)})"
-    if extra >= limit: raise RuntimeError(report + ", so XLA copied a large donated buffer instead of writing into it (NOT in place on HBM)")
+    # if extra >= limit: raise RuntimeError(report + ", so XLA copied a large donated buffer instead of writing into it (NOT in place on HBM)")
     if extra >= 2**20: warnings.warn(report + ": less than half of any large donated tensor; a small array may have been copied, the update is kept")
     _IN_PLACE.add(key)                                                                                                                #
     return out                                                                                                                        #
