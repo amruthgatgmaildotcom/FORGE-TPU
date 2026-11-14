@@ -9,14 +9,6 @@ from forge_tpu.state import FusedOptimizerState
 #      it also has a classmethod called from_linear which steals/shares with already existing nn.Linear object and modifies it to be a FusedLinear
 #      while i am writing this, for simplicity only torch.bfloat16 and torch.float32 are allowed for parameters and v5e only does math on max 16 bit numbers natively
 #      although 32 bit floats can be broken into 2 and used for states, right now only state types allowed are bf16 and int8 (+ fp32 quantized)
-#
-#   NOT DONE HERE (Dikshant's FORGE has these in module.py, none of them needs a GPU, so all are doable on TPU) :
-#      1. FusedOptimizerManager : one object for the whole model. manager.pre_step(lr = ...) gives the new lr to every FusedLinear before each forward (LR schedule),
-#         manager.get_non_fused_params() gives the params which a torch optimizer must still update (bias, norms, embeddings), and it saves / loads the optimizer states of all layers at once.
-#         here, by hand : layer.fusedStateObject.hparams["lr"] = new_lr on every layer (lr is runtime data, no recompile), the params are filtered as in benchmarks/llama.py,
-#         and layer.fusedStateObject.state_dict() / load_state_dict() layer by layer
-#      2. gradient accumulation (his set_accumulating) : see autograd.py
-#      3. use_fused_backward = False, per layer : normal matmul for dw, then an optimizer-only kernel. see the commented optimizer_only in kernel/fused_grad.py
 
 
 
