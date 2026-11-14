@@ -101,18 +101,18 @@ def _rebind(fusedStateObject, out):
 
 
 
-def _run(scalars: jax.Array, inputs: list[jax.Array], w: jax.Array, states: list[jax.Array], *, optimizer: str, state_mode: str, interpret: bool, tiles = None) -> tuple[jax.Array, ...]:
+def _run(scalars: jax.Array, inputs: list[jax.Array], w: jax.Array, states: list[jax.Array], *, optimizer: str, state_mode: str, interpret: bool, tiles: str = "") -> tuple[jax.Array, ...]:
     # pure JAX. inputs = [go (BT, V), x (BT, H)], w (V, H), states = _flatten(buffers). Returns (w_new, *states_new)                  #
-    # tiles = None : the kernel's DEFAULT_TILES. only benchmarks/tiler.py gives tiles (bv, bh, bbt), to time them                              #
+    # tiles = "" : the kernel's DEFAULT_TILES. only benchmarks/tiler.py gives tiles, as a string "bv x bh x bbt" (e.g. "512x1024x1024") : jax_op wants a type on every argument, and str is a type it takes
     template = kernel.state_arrays(optimizer, state_mode, 64, 128, jnp.float32)                                                       # only its keys are used
-    w_new, states_new = kernel.fused_grad(*inputs, w, _unflatten(states, template, optimizer), scalars, optimizer = optimizer, state_mode = state_mode, interpret = interpret, tiles = tiles)
+    w_new, states_new = kernel.fused_grad(*inputs, w, _unflatten(states, template, optimizer), scalars, optimizer = optimizer, state_mode = state_mode, interpret = interpret, tiles = tuple(map(int, tiles.split("x"))) if tiles else None)
     return (w_new, *_flatten(states_new, optimizer))                                                                                  #
 
 @functools.cache
-def _run_jax_op(optimizer, state_mode, tiles = None):
+def _run_jax_op(optimizer, state_mode, tiles = ""):
     # wrap _run (a pure jax, takees in and out jax.Array) with torch.tpu.pallas.jax_op, now _run_jax_op is basically _run but for torch tensors instead of jax arrays
     # donate_argnums = (2, 3) : w and states are given away, so XLA can write the new w and states into the same HBM (see _rebind). one op per (optimizer, state_mode, tiles), its name must be unique
-    name = f"pallas::forge_fused_grad_{optimizer}_{state_mode}" + ("_" + "x".join(map(str, tiles)) if tiles else "")
+    name = f"pallas::forge_fused_grad_{optimizer}_{state_mode}" + ("_" + tiles if tiles else "")
     return torch.tpu.pallas.jax_op(name, functools.partial(_run, optimizer = optimizer, state_mode = state_mode, interpret = False, tiles = tiles), donate_argnums = (2, 3))
 
 @functools.lru_cache(maxsize = 8)
