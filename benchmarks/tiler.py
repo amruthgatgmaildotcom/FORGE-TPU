@@ -38,6 +38,7 @@ def sync():
     if DEVICE == "tpu": torch.accelerator.synchronize()
 
 def update(scalars, go, x, w, flat, mode, tiles):
+    tiles = "x".join(map(str, tiles))                                  # _bridge takes the tiles as a string
     # one fused update with these tiles, as _bridge.fused_update does it (without the replay, the same for every triple). Returns [w, *states], the old ones are given away
     if DEVICE == "tpu": return _bridge._run_jax_op("adamw", mode, tiles)(_bridge._device_scalars(tuple(scalars), w.device), [go, x], w, flat)
     out = _bridge._run(jnp.asarray(scalars, jnp.float32), [_bridge._to_jax(go), _bridge._to_jax(x)], _bridge._to_jax(w), [_bridge._to_jax(t) for t in flat], optimizer = "adamw", state_mode = mode, interpret = True, tiles = tiles)
