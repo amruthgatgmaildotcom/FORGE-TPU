@@ -98,6 +98,14 @@ For each model there are three plots:
 The kernel uses one tile size `(bv, bh, bbt)` for every layer (`DEFAULT_TILES` in `src/forge_tpu/kernel/_utils.py`).
 `benchmarks/colab_cell_tiler.py` times many tile sizes on every fused layer shape of the three models and reports the fastest. It changes nothing.
 
+## Profile
+
+`benchmarks/profiling.py` shows where the time of one training step goes, for the same models and methods (`colab_cell_all.py` runs it after the benchmarks, `colab_cell_profiling.py` runs it alone).
+
+- `profile_<model>_timeline.png`: one step on a time axis. For each method, the step as the benchmark runs it (when Python has issued each phase, and when the TPU is done), and the same step with a sync after each phase (Python time and TPU time of each phase).
+- `profile_<model>_host.png`: the host (Python and PyTorch) time of each phase, in a few groups (FORGE update, optimizer, matmul, attention, ...). Measured with `torch.profiler`, which sees the CPU side only.
+- `profile_<model>_table.md`: the same numbers as a table.
+
 ## Known limits
 
 - `torch.compile` doesnt work.

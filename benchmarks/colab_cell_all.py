@@ -1,4 +1,4 @@
-# FORGE TPU : MLP + Llama 1B + Qwen3 0.6B benchmarks (no correctness tests), one Colab cell (TPU v5e-1 / v6e-1). ~18 min.
+# FORGE TPU : MLP + Llama 1B + Qwen3 0.6B benchmarks, then the profile of the same runs (no correctness tests), one Colab cell (TPU v5e-1 / v6e-1). ~30 min (18 benchmarks + 12 profile).
 # Each run stops after MAX_SECONDS (60 here, 180 in the single-model cells), so the 12 runs fit in the free tier. Results : results.zip with mlp/, llama/, qwen/
 import os, re, shutil, subprocess, sys, warnings, zipfile
 from IPython.display import Image, Markdown, display
@@ -44,6 +44,7 @@ assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"
 for prefix in ("mlp", "llama", "qwen"):
     print(f"\n========== {prefix} ==========")
     OUT = f"{REPO}/results/{prefix}"
+    shutil.rmtree(OUT, ignore_errors = True)                           # results from the zip : a failed run must give a missing row, not an old one
     ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT, "MAX_SECONDS": "60"}
     failed = [name for name in ("adamw", "adamw_fused", "forge_bf16", "forge_int8") if run(f"benchmarks/{prefix}.py", name, cwd = REPO, env = ENV) != 0]
     if failed: print(f"\nFAILED : {prefix} {failed} (see the errors above). The report shows the others.")
@@ -51,5 +52,16 @@ for prefix in ("mlp", "llama", "qwen"):
     for png in ("headline", "loss", "memory"): display(Image(f"{OUT}/{prefix}_{png}.png"))
     display(Markdown(open(f"{OUT}/{prefix}_table.md").read()))
 
-# 4. download results.zip (folders mlp/, llama/, qwen/). To select the folder : turn on 'Ask where to save each file' in your browser settings
+# 4. profile : where the time of one step goes (benchmarks/profiling.py), the same models and methods, into the same results/<model> folders
+for prefix in ("mlp", "llama", "qwen"):
+    print(f"\n========== {prefix} : profile ==========")
+    OUT = f"{REPO}/results/{prefix}"
+    ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src:{REPO}/benchmarks", "RESULTS": OUT}
+    failed = [name for name in ("adamw", "adamw_fused", "forge_bf16", "forge_int8") if run("benchmarks/profiling.py", prefix, name, cwd = REPO, env = ENV) != 0]
+    if failed: print(f"\nFAILED : {prefix} profile {failed} (see the errors above). The report shows the others.")
+    if run("benchmarks/profiling.py", prefix, "report", cwd = REPO, env = ENV) != 0: print(f"{prefix} : the profile report failed"); continue
+    for png in ("timeline", "host"): display(Image(f"{OUT}/profile_{prefix}_{png}.png"))
+    display(Markdown(open(f"{OUT}/profile_{prefix}_table.md").read()))
+
+# 5. download results.zip (folders mlp/, llama/, qwen/ : benchmarks and profiles). To select the folder : turn on 'Ask where to save each file' in your browser settings
 files.download(shutil.make_archive("/content/results", "zip", f"{REPO}/results"))
