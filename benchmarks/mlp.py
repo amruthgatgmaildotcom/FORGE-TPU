@@ -56,13 +56,15 @@ def state_bytes(model, opt):                                           # torch A
 
 
 def layer_trace(model, opt, batch, loss_fn, base):
-    # one more step (not timed) : memory after every Linear / Embedding in the forward, before each of their backwards, and at loss, end of backward, step.
+    # one more step (not timed) : memory after every leaf module (Linear, Embedding, norm, activation, ...) in the forward, before each of their backwards, and at loss, end of backward, step.
     # Each point is (memory held at the point, peak since the point before) : the peak also shows short-lived tensors (inside an op, the loss, the step)
     acc, points, hooks = torch.accelerator, [], []
     def mark(label = ""):
         acc.synchronize(); points.append(((acc.memory_allocated() - base) / GiB, (acc.max_memory_allocated() - base) / GiB, label)); acc.reset_peak_memory_stats()
-    def after_forward(module, inputs, out): mark(); hooks.append(out.register_hook(lambda grad: mark()))
-    hooks += [m.register_forward_hook(after_forward) for m in model.modules() if isinstance(m, (nn.Linear, FusedLinear, nn.Embedding))]
+    def after_forward(module, inputs, out):
+        mark()
+        if torch.is_tensor(out) and out.requires_grad: hooks.append(out.register_hook(lambda grad: mark()))   # a tuple (e.g. RoPE's cos, sin) or a tensor with no grad : no backward point
+    hooks += [m.register_forward_hook(after_forward) for m in model.modules() if not any(m.children())]   # every leaf module : the more points, the more precise the line
     x, y = batch
     mark(); points.clear()                                             # starts the peak count
     mark("start"); loss = loss_fn(model(x), y); mark("loss"); loss.backward(); mark("backward")
@@ -169,8 +171,8 @@ def memory(R, title, path):
         c.plot(range(1, r["steps"] + 1), r["held_gib"], color = color, ls = ":", lw = 1, alpha = 0.7)
         y, top = [p[0] for p in r["trace"]], [p[1] for p in r["trace"]]
         x = list(range(len(y))); x[-1] += max(1, len(y) // 25)        # room for the step
-        d.plot(x, y, color = color, ls = ls, lw = 2, label = LABELS[n]); d.axhline(r["peak"], color = color, lw = 0.8, alpha = 0.6)
-        d.fill_between(x, y, top, step = "pre", color = color, alpha = 0.12, lw = 0)   # short-lived peak between two points
+        d.plot(x, y, color = color, ls = ls, lw = 1.5, label = LABELS[n], drawstyle = "steps-post"); d.axhline(r["peak"], color = color, lw = 0.8, alpha = 0.6)   # no slope between two points : held memory stays flat until the next point, then jumps
+        d.fill_between(x, y[:1] + y[:-1], top, step = "pre", color = color, alpha = 0.12, lw = 0)   # between two points : from what was held at the first one up to the peak in between
     c.axvspan(0.5, WARMUP + 0.5, color = "#ecebe6", zorder = 0)
     c.text(WARMUP / 2 + 0.5, 0.03, "warmup (not timed)", transform = c.get_xaxis_transform(), ha = "center", color = "#666", fontsize = 11)
     styles = [Line2D([], [], color = LINES[n][0], ls = LINES[n][1], lw = 2, label = LABELS[n]) for n in R]
@@ -183,7 +185,7 @@ def memory(R, title, path):
         d.axvspan(a, b, color = color, zorder = 0); d.text((a + b) / 2, 0.03, name, transform = d.get_xaxis_transform(), ha = "center", color = "#666", fontsize = 11)
     d.set_xticks([at[k] for k in ("start", "loss", "backward", "step")], ["start", "loss", "backward", "step"])
     for tick, ha in zip(d.get_xticklabels(), ("center", "center", "right", "left")): tick.set_ha(ha)
-    d.text(1, 1.01, "line: held at each point   shade: peak between two points   thin lines: peak of the timed steps", transform = d.transAxes, ha = "right", va = "bottom", color = "#666", fontsize = 10)
+    d.set_xlabel("line : held at each point   shade : peak between two points   thin lines : peak of the timed steps", color = "#666", fontsize = 10)   # under the plot : at the top it ran into the title
     c.set_xlabel("Step", fontsize = 13); d.legend(fontsize = 11, loc = "upper left")
     c.set_title("(c) Memory at every step", fontsize = 16, fontweight = "bold", loc = "left"); d.set_title("(d) Inside one step, layer by layer", fontsize = 16, fontweight = "bold", loc = "left")
     for ax in (c, d): ax.set_ylabel("Memory (GiB)", fontsize = 13); ax.grid(ls = ":"); ax.spines[["top", "right"]].set_visible(False)
