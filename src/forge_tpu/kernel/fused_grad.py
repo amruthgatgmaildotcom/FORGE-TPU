@@ -99,9 +99,9 @@ def _epilogue(opt, codec, scalars_ref, w_ref, state_refs, grad, w_out, states_ou
 
 
 
-#   optimizer_only is commented : nothing calls it and it was never run on the TPU. Dikshant uses his optimizer-only kernel for two things, both doable on TPU :
-#      1. gradient accumulation : dw of the micro-steps is added in a buffer, then one update with the full dw (see autograd.py)
-#      2. use_fused_backward = False for a layer where the fused kernel is slower (he says : a very large V, because x is read again for every weight tile)
+#   optimizer_only is commented : nothing calls it and it was never run on the TPU. FORGE (GPU) uses an optimizer-only kernel for two things, both doable on TPU :
+#      1. gradient accumulation : dw of the micro-steps is added in a buffer, then one update with the full dw
+#      2. use_fused_backward = False for a layer where the fused kernel is slower (a very large V, because x is read again for every weight tile)
 # @functools.partial(jax.jit, static_argnames = ("optimizer", "state_mode", "interpret", "tiles"))
 # def optimizer_only(grad, w, states, scalars, *, optimizer, state_mode, interpret, tiles = None):
 #     # Like fused_grad, with grad (V, H) given (any float dtype, each tile is used as fp32); bbt in tiles is ignored                   # 

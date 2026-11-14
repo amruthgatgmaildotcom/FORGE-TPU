@@ -33,7 +33,7 @@ import jax.numpy as jnp
 
 class AdamW:
 
-    name, states, floors = "adamw", ("m", "v"), {"v": 1e-8}                                                                            # floor only for "v" (as Dikshant, 1e-8), cuz in the update we
+    name, states, floors = "adamw", ("m", "v"), {"v": 1e-8}                                                                            # floor only for "v" (1e-8, as in FORGE), cuz in the update we
     defaults = {'lr': 1e-4, 'beta1': 0.9, 'beta2': 0.999, 'eps': 1e-8, 'weight_decay': 0.01}                                          # divide by sqrt(v) and int8 can round a small v to 0. bf16 states have no floor
     # these are static members                                                                                                        #
 
