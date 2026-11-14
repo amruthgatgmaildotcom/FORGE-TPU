@@ -6,9 +6,6 @@ import jax.numpy as jnp
 #          2.  @staticmethod def update(w, g, st, s)      |   here st is {"state_var": matrix} is decoded state, s is scalars (in SMEM), better understood by reading AdamW.update
 #          3.  static members : name (string), states (tuple of state names), floors ({state : smallest decoded value}, int8 states only), defaults (hyperparameters)
 #          4.  Finally there is a dictionary at the very end of this file named OPTIMIZERS, update the new class over there also
-#   NOT DONE HERE : Dikshant's repo also has SGD (fused_grad_sgd, no states) and his paper runs 13 optimizer families. None needs anything from the GPU, each one is one more
-#   class in this file (SGD : states = (), update returns w * (1 - lr * wd) - lr * g)
-
 
 
 
