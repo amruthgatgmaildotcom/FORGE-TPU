@@ -62,7 +62,7 @@ def _linear_backward(grad_output, x, weight, has_bias, needs_dx, fusedStateObjec
     # we have to return in this order only : dx for next layer, dw of this layer (None), db of this layer (if not None else None)
     go2d = grad_output.reshape(-1, grad_output.shape[-1])                                                                             # go2d is (BT, V) tensor, needed if user uses transformers
     x2d = x.reshape(-1, x.shape[-1])                                                                                                  # x2d is (BT, H) tensor, needed if user uses transformers
-    grad_bias = go2d.sum(0) if has_bias else None                                                                                     # grad_bias is (V) tensor, needed if user uses transformers
+    grad_bias = go2d.sum(0) if has_bias else None                                                                                     # grad_bias is (V) tensor, only if the layer has a bias (FORGE does not update it)
     fusedStateObject.increment_step()                                                                                                 # this layer's update count
     dx = _bridge.fused_update(go2d.contiguous(), x2d.contiguous(), fusedStateObject, needs_dx)                                        # updates w and its state, returns dx
     return None if dx is None else dx.reshape(*grad_output.shape[:-1], -1), None, grad_bias                                           # 

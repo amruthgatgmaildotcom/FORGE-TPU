@@ -29,6 +29,10 @@ print("TPU OK :", dev, os.environ.get("TPU_ACCELERATOR_TYPE", ""))
 '''
 assert run("-c", CHECK) == 0, "STOP : no working TPU (see the message above)"
 
+# 1b. llama.py and qwen.py take the model code from the transformers library (pure Python, the weights are NOT downloaded) : install it if it is missing or too old for Qwen3
+HAVE = "try: from transformers import LlamaForCausalLM, Qwen3ForCausalLM\nexcept Exception: raise SystemExit(1)"
+if run("-c", HAVE) != 0: assert run("-m", "pip", "install", "-q", "-U", "transformers") == 0 and run("-c", HAVE) == 0, "STOP : transformers cannot be installed / imported (see the message above)"
+
 # 2. the repo zip (benchmarks/, src/, README.md at its top level) -> /content/TRAVELLER
 REPO = "/content/TRAVELLER"
 shutil.rmtree(REPO, ignore_errors = True)

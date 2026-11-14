@@ -5,7 +5,7 @@ from .optimizers import OPTIMIZERS
 
 DEFAULT_TILES = (512, 1024, 1024)     # (bv, bh, bbt)
 #   Readme.md
-#      This file is an internal to kernel folder (starts with _), used by fused_grad.py only
+#      This file is internal to the kernel folder (starts with _), used by fused_grad.py (and lookup by __init__.py)
 #      each defined function is readable and self explainatory, so im skipping explaination here
 
 

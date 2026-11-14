@@ -4,9 +4,9 @@ from jax.experimental.pallas import tpu as pltpu
 from . import _utils
 
 #   Readme.md
-#     This file contains exactly two functions meant to be called from outside this file (_kernel and _epilouge are internal). the first one is fused_grad. This function takes in
+#     This file contains one function meant to be called from outside this file, fused_grad (_kernel and _epilogue are internal). This function takes in
 #     full matrices (2d jax arrays) of size ~ H/V/BT and updates the weight and state matrices exactly like its discussed in the FORGE research paper.
-#     The other one is optimizer_only, and this function assumes that dLoss/dw matrix is materialzed fully and passed. as of now it has not been used anywhere.
+#     The other one, optimizer_only (commented at the end of the file), assumes that the dLoss/dw matrix is fully materialized and passed. nothing uses it yet, see its comment.
 
 
 
@@ -91,7 +91,7 @@ def _epilogue(opt, codec, scalars_ref, w_ref, state_refs, grad, w_out, states_ou
     st = {state_string: codec.decode(state_refs[state_string], opt.floors.get(state_string)) for state_string in opt.states}
     w, st = opt.update(w_ref[...].astype(jnp.float32), grad, st, scalars_ref)                                                         # inputs to opt.update are all jax arrays of small tiles
     w_out[...] = w.astype(w_out.dtype)                                                                                                # NOTE : none of these functions are creating duplicates inside VMEM anywhere
-    for state_string in opt.states: codec.encode(st[state_string], states_out[state_string])                                          # everything that seems like it happens in VREGs 
+    for state_string in opt.states: codec.encode(st[state_string], states_out[state_string])                                          # everything that seems like a copy (astype, decode, update, encode) is on a tile, in VREGs
 
 
 
@@ -99,26 +99,29 @@ def _epilogue(opt, codec, scalars_ref, w_ref, state_refs, grad, w_out, states_ou
 
 
 
-@functools.partial(jax.jit, static_argnames = ("optimizer", "state_mode", "interpret", "tiles"))
-def optimizer_only(grad, w, states, scalars, *, optimizer, state_mode, interpret, tiles = None):
-    # Like fused_grad, with grad (V, H) given (any float dtype, each tile is used as fp32); bbt in tiles is ignored                   # 
-    opt, codec = _utils.lookup(optimizer, state_mode)                                                                                 # 
-    V, H = w.shape                                                                                                                    # 
-    bv, bh = _utils.pick_tiles(V, H, tiles, codec)                                                                                    # 
-    def kernel(s_ref, g_ref, w_ref, st_refs, w_out, st_out): _epilogue(opt, codec, s_ref, w_ref, st_refs, g_ref[...].astype(jnp.float32), w_out, st_out)
-    return pl.pallas_call(                                                                                                            # 
-        kernel, grid = (pl.cdiv(V, bv), pl.cdiv(H, bh)),                                                                              # 
-        in_specs = (pl.BlockSpec(scalars.shape, lambda i, j: (0,), memory_space = pltpu.SMEM),                                        # 
-                    pl.BlockSpec((bv, bh), lambda i, j: (i, j), memory_space = pltpu.VMEM),                                           # 
-                    pl.BlockSpec((bv, bh), lambda i, j: (i, j), memory_space = pltpu.VMEM),                                           # 
-                    {n: codec.specs(bv, bh) for n in opt.states}),                                                                    # 
-        out_specs = (pl.BlockSpec((bv, bh), lambda i, j: (i, j), memory_space = pltpu.VMEM),                                          # 
-                     {n: codec.specs(bv, bh) for n in opt.states}),                                                                   # 
-        out_shape = _utils.like(w, states),                                                                                           # 
-        input_output_aliases =  {2 + i: i for i in range(1 + _utils.count_arrays(states))},                                           # 
-        compiler_params = _utils.compiler_params(("parallel", "parallel")),                                                           # 
-        interpret = interpret,                                                                                                        # 
-    )(scalars, grad, w, states)                                                                                                       # 
+#   optimizer_only is commented : nothing calls it and it was never run on the TPU. FORGE (GPU) uses an optimizer-only kernel for two things, both doable on TPU :
+#      1. gradient accumulation : dw of the micro-steps is added in a buffer, then one update with the full dw
+#      2. use_fused_backward = False for a layer where the fused kernel is slower (a very large V, because x is read again for every weight tile)
+# @functools.partial(jax.jit, static_argnames = ("optimizer", "state_mode", "interpret", "tiles"))
+# def optimizer_only(grad, w, states, scalars, *, optimizer, state_mode, interpret, tiles = None):
+#     # Like fused_grad, with grad (V, H) given (any float dtype, each tile is used as fp32); bbt in tiles is ignored                   # 
+#     opt, codec = _utils.lookup(optimizer, state_mode)                                                                                 # 
+#     V, H = w.shape                                                                                                                    # 
+#     bv, bh = _utils.pick_tiles(V, H, tiles, codec)                                                                                    # 
+#     def kernel(s_ref, g_ref, w_ref, st_refs, w_out, st_out): _epilogue(opt, codec, s_ref, w_ref, st_refs, g_ref[...].astype(jnp.float32), w_out, st_out)
+#     return pl.pallas_call(                                                                                                            # 
+#         kernel, grid = (pl.cdiv(V, bv), pl.cdiv(H, bh)),                                                                              # 
+#         in_specs = (pl.BlockSpec(scalars.shape, lambda i, j: (0,), memory_space = pltpu.SMEM),                                        # 
+#                     pl.BlockSpec((bv, bh), lambda i, j: (i, j), memory_space = pltpu.VMEM),                                           # 
+#                     pl.BlockSpec((bv, bh), lambda i, j: (i, j), memory_space = pltpu.VMEM),                                           # 
+#                     {n: codec.specs(bv, bh) for n in opt.states}),                                                                    # 
+#         out_specs = (pl.BlockSpec((bv, bh), lambda i, j: (i, j), memory_space = pltpu.VMEM),                                          # 
+#                      {n: codec.specs(bv, bh) for n in opt.states}),                                                                   # 
+#         out_shape = _utils.like(w, states),                                                                                           # 
+#         input_output_aliases =  {2 + i: i for i in range(1 + _utils.count_arrays(states))},                                           # 
+#         compiler_params = _utils.compiler_params(("parallel", "parallel")),                                                           # 
+#         interpret = interpret,                                                                                                        # 
+#     )(scalars, grad, w, states)                                                                                                       # 
 
 
 
