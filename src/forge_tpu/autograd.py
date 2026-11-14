@@ -5,10 +5,6 @@ from forge_tpu import _bridge
 #     This file contains exactly one class for outsiders, FusedLinearFunction. it has nothing else for outsiders (_linear_backward is
 #     internal). the class inherits from torch.autograd.Function, and we just have to define two staticmethods for it.
 #     'forward' and 'backward'. more details about it under the line 'class FusedLinearFunction(torch.autograd.Function):'
-#
-#   NOT DONE HERE (Dikshant's autograd.py does it, doable on TPU) : gradient accumulation. On a micro-step he materializes dw = go.T @ x, adds it to a pending buffer and
-#   does not update. On the last micro-step he adds the pending buffer and updates with an optimizer-only kernel (the commented optimizer_only in
-#   kernel/fused_grad.py). Here every backward is one update. (the full dw exists in HBM while accumulating, so that path saves no memory)
 
 
 
