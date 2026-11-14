@@ -4,8 +4,6 @@ from .codecs import CODECS
 from .optimizers import OPTIMIZERS
 
 DEFAULT_TILES = (512, 1024, 1024)     # (bv, bh, bbt)
-# Dikshant autotunes the tiles for every (BT, V, H) (triton.autotune). NOT DONE HERE : one fixed triple for every layer. benchmarks/tiler.py times many triples for each
-# layer shape of the benchmark models on the TPU; a table {(BT, V, H) : tiles} read by pick_tiles would do what his autotune does
 #   Readme.md
 #      This file is internal to the kernel folder (starts with _), used by fused_grad.py (and lookup by __init__.py)
 #      each defined function is readable and self explainatory, so im skipping explaination here
