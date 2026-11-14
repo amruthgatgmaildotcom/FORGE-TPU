@@ -1,0 +1,224 @@
+import gc, json, math, os, statistics, sys, time, torch, torch.nn as nn, torch.nn.functional as F
+from forge_tpu import FusedLinear
+
+# Deep residual MLP that learns a fixed random teacher. All parameters are bias-free Linear weights, so FORGE needs no second optimizer.
+# Memory at the defaults (1.09B params): AdamW = 2 (w) + 2 (grad) + 4 (m, v) = 8 B/param = 8.7 GB, + ~2.7 GB activations + 0.5 GB data.
+# This file also holds the measure + report engine that llama.py and qwen.py use (see "measure" and "report" below).
+DEVICE, DTYPE = "tpu", torch.bfloat16
+D, FF, LAYERS, BT, BATCHES = 4096, 16384, 8, 4096, 8                 # width, hidden, blocks, tokens per step, batches in the dataset
+STEPS, LR, WD = 300, 3e-4, 0.01
+OPTIMIZERS = ("adamw", "adamw_fused", "forge_bf16", "forge_int8")
+WARMUP, LOG, MAX_SECONDS = 10, 20, float(os.environ.get("MAX_SECONDS", 180))   # a run stops at STEPS or after MAX_SECONDS; the first WARMUP steps are not timed
+OUT, GiB = os.environ.get("RESULTS", "results"), 2**30
+
+
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList(nn.Sequential(nn.Linear(D, FF, bias = False), nn.GELU("tanh"), nn.Linear(FF, D, bias = False)) for _ in range(LAYERS))
+        self.head = nn.Linear(D, D, bias = False)
+
+    def forward(self, x):
+        for block in self.blocks: x = x + block(F.rms_norm(x, (D,)))
+        return self.head(F.rms_norm(x, (D,)))
+
+
+def make_data(seed = 0):
+    # BATCHES fixed (x, y) pairs on DEVICE, y = tanh(x A) B : smooth, learnable, the same for every run
+    g = torch.Generator().manual_seed(seed)
+    A, B = (torch.randn(D, D, generator = g).div(math.sqrt(D)).to(DEVICE, DTYPE) for _ in range(2))
+    xs = [torch.randn(BT, D, generator = g).to(DEVICE, DTYPE) for _ in range(BATCHES)]
+    return [(x, torch.tanh(x @ A) @ B) for x in xs]
+
+
+def make_model(name, seed = 0):
+    torch.manual_seed(seed)                                            # same init for all four optimizers
+    model = MLP().to(DEVICE, DTYPE)
+    if name.startswith("forge"):                                       # swap every nn.Linear for a FusedLinear that shares its weight
+        mode = name.split("_")[1]
+        for parent in list(model.modules()):
+            for child_name, child in parent.named_children():
+                if isinstance(child, nn.Linear): setattr(parent, child_name, FusedLinear.from_linear(child, state_mode = mode, lr = LR, weight_decay = WD))
+        return model, None
+    return model, torch.optim.AdamW(model.parameters(), lr = LR, weight_decay = WD, foreach = False, fused = name == "adamw_fused")
+
+
+def loss_fn(out, y): return F.mse_loss(out.float(), y.float())
+
+
+#------------------------------------------------------------------------- measure -------------------------------------------------------------------------#
+
+def nbytes(tensors): return sum(t.numel() * t.element_size() for t in tensors)
+
+def state_bytes(model, opt):                                           # torch AdamW states + FORGE states
+    torch_states = nbytes(t for s in opt.state.values() for t in s.values() if torch.is_tensor(t)) if opt else 0
+    return torch_states + nbytes(t for m in model.modules() if isinstance(m, FusedLinear) for arrays in m.fusedStateObject.buffers.values() for t in arrays.values())
+
+
+def layer_trace(model, opt, batch, loss_fn, base):
+    # one more step (not timed) : memory after every Linear / Embedding in the forward, before each of their backwards, and at loss, end of backward, step.
+    # Each point is (memory held at the point, peak since the point before) : the peak also shows short-lived tensors (inside an op, the loss, the step)
+    acc, points, hooks = torch.accelerator, [], []
+    def mark(label = ""):
+        acc.synchronize(); points.append(((acc.memory_allocated() - base) / GiB, (acc.max_memory_allocated() - base) / GiB, label)); acc.reset_peak_memory_stats()
+    def after_forward(module, inputs, out): mark(); hooks.append(out.register_hook(lambda grad: mark()))
+    hooks += [m.register_forward_hook(after_forward) for m in model.modules() if isinstance(m, (nn.Linear, FusedLinear, nn.Embedding))]
+    x, y = batch
+    mark(); points.clear()                                             # starts the peak count
+    mark("start"); loss = loss_fn(model(x), y); mark("loss"); loss.backward(); mark("backward")
+    if opt: opt.step(); opt.zero_grad(set_to_none = True)
+    mark("step")
+    for h in hooks: h.remove()
+    return points
+
+
+def measure(name, make_model, data, loss_fn, flops, steps = STEPS):
+    # one step = forward + backward + update, timed between two device syncs. Memory : the peak of each step and what is held after it, above the data
+    acc = torch.accelerator
+    acc.synchronize(); base = acc.memory_allocated()
+    model, opt = make_model(name)
+    model.train()
+    losses, times, peaks, held, start = [], [], [], [], time.perf_counter()
+    for step in range(steps):
+        x, y = data[step % len(data)]
+        acc.reset_peak_memory_stats(); t0 = time.perf_counter()
+        loss = loss_fn(model(x), y)
+        loss.backward()                                                # FORGE : the fused weights are updated here, inside backward
+        if opt: opt.step(); opt.zero_grad(set_to_none = True)
+        acc.synchronize(); t1 = time.perf_counter()
+        losses.append(loss.item()); times.append((t1 - t0) * 1e3)
+        peaks.append((acc.max_memory_allocated() - base) / GiB); held.append((acc.memory_allocated() - base) / GiB)
+        if step % LOG == 0: print(f"{name:12s} step {step:4d}  loss {losses[-1]:.4f}  {times[-1]:8.1f} ms  {peaks[-1]:6.2f} GiB", flush = True)
+        if t1 - start > MAX_SECONDS: break
+    trace = layer_trace(model, opt, data[0], loss_fn, base)
+    params, weights, states = sum(p.numel() for p in model.parameters()), nbytes(model.parameters()), state_bytes(model, opt)
+    grads = nbytes(p for group in opt.param_groups for p in group["params"]) if opt else 0   # only the params of a torch optimizer get a .grad
+    w = WARMUP if len(times) > WARMUP + 1 else 0                       # a very short run : use every step
+    peak, tflops = max(peaks[w:]), [flops(params) / t / 1e9 for t in times[w:]]   # t in ms
+    del model, opt; gc.collect()
+    return dict(name = name, params = params, steps = len(losses), losses = losses, times_ms = times, mem_gib = peaks, held_gib = held, trace = trace, peak = peak,
+                weights = weights / GiB, states = states / GiB, grads = grads / GiB, activations = peak - (weights + states + grads) / GiB,
+                step_ms = statistics.median(times[w:]), step_std = statistics.pstdev(times[w:]), tflops = statistics.median(tflops), tflops_std = statistics.pstdev(tflops))
+
+
+#------------------------------------------------------------------------- report --------------------------------------------------------------------------#
+
+LABELS = {"adamw": "vanilla AdamW", "adamw_fused": "fused AdamW", "forge_bf16": "FORGE (bf16)", "forge_int8": "FORGE (int8)"}
+COLORS = {"adamw": "#2f7ed8", "adamw_fused": "#8c8c8c", "forge_bf16": "#14896b", "forge_int8": "#14896b"}           # headline figure
+LINES = {"adamw": ("#2f7ed8", "--"), "adamw_fused": ("#8c8c8c", ":"), "forge_bf16": ("#14896b", "-"), "forge_int8": ("#e5484d", "-")}   # line plots
+PARTS = {"weights": ("weights", "#2f7ed8"), "states": ("opt states", "#1db07a"), "activations": ("activations", "#c9ced8"), "grads": ("weight gradient", "#e5484d")}
+RED = "#c62828"
+
+
+def headline(R, path):
+    import matplotlib.pyplot as plt
+    names = list(R)
+    fig, (a, b) = plt.subplots(1, 2, figsize = (14, 5.6), gridspec_kw = {"width_ratios": [1.05, 1]})
+    # (a) peak memory, stacked
+    forge = [i for i, n in enumerate(names) if n.startswith("forge")]
+    if forge: a.axvspan(min(forge) - 0.5, max(forge) + 0.5, color = "#e8f4ea", zorder = 0)
+    bottom = [0.0] * len(names)
+    for key, (label, color) in PARTS.items():
+        h = [max(R[n][key], 0) for n in names]
+        a.bar(range(len(names)), h, 0.62, bottom = bottom, color = color, label = label, zorder = 2)
+        bottom = [s + v for s, v in zip(bottom, h)]
+    for i, n in enumerate(names): a.text(i, R[n]["peak"] * 1.01, f"{R[n]['peak']:.1f}", ha = "center", va = "bottom", fontsize = 14, fontweight = "bold")
+    a.set_xticks(range(len(names)), [LABELS[n].replace(" ", "\n") for n in names], fontsize = 13)
+    for tick, n in zip(a.get_xticklabels(), names): tick.set_fontweight("bold" if n.startswith("forge") else "normal")
+    a.set_ylim(0, max(R[n]["peak"] for n in names) * 1.35); a.set_xlim(-0.5, len(names) - 0.5)
+    a.set_ylabel("Peak memory (GiB)", fontsize = 13); a.set_title("(a) Peak memory", fontsize = 17, fontweight = "bold")
+    a.grid(axis = "y", ls = ":", zorder = 1); a.legend(fontsize = 12, loc = "upper right")
+    # (b) memory vs speed
+    for n in names:
+        big = n.startswith("forge")
+        b.scatter(R[n]["peak"], R[n]["step_ms"], s = 260 if big else 70, color = COLORS[n], zorder = 3)
+        b.annotate(LABELS[n], (R[n]["peak"], R[n]["step_ms"]), xytext = (14, 0) if big else (-10, 12), textcoords = "offset points", va = "center",
+                   ha = "left" if big else "right", fontsize = 13 if big else 12, fontweight = "bold" if big else "normal", color = "black" if big else COLORS[n])
+    if "adamw" in R:
+        for n in (n for n in names if n.startswith("forge")):
+            p, q = (R["adamw"]["peak"], R["adamw"]["step_ms"]), (R[n]["peak"], R[n]["step_ms"])
+            b.annotate("", q, p, arrowprops = dict(arrowstyle = "-|>", color = RED, ls = "--", lw = 2, shrinkA = 8, shrinkB = 12))
+            r = p[1] / q[1]
+            b.text((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, f"{r:.2f}× faster" if r >= 1 else f"{1 / r:.2f}× slower", color = RED, fontsize = 13, fontweight = "bold", ha = "center", va = "bottom")
+    xs, ys = [R[n]["peak"] for n in names], [R[n]["step_ms"] for n in names]
+    pad_x, pad_y = (max(xs) - min(xs)) * 0.35 + 0.5, (max(ys) - min(ys)) * 0.25 + 1
+    b.set_xlim(max(xs) + pad_x, min(xs) - pad_x); b.set_ylim(max(ys) + pad_y, min(ys) - pad_y)  # both inverted : better is up and right
+    b.set_xlabel("Peak memory (GiB)  ←  smaller", fontsize = 13); b.set_ylabel("Step time (ms)  ↑  faster", fontsize = 13)
+    b.set_title("(b) Memory vs. speed", fontsize = 17, fontweight = "bold"); b.grid(ls = ":")
+    for ax in (a, b): ax.spines[["top", "right"]].set_visible(False); ax.tick_params(labelsize = 12)
+    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+
+
+def curves(R, key, ylabel, title, path):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize = (10, 5.5))
+    for n, r in R.items(): ax.plot(range(r["steps"]), r[key], color = LINES[n][0], ls = LINES[n][1], lw = 2, label = LABELS[n])
+    ax.set_xlabel("Training step", fontsize = 13); ax.set_ylabel(ylabel, fontsize = 13); ax.set_title(title, fontsize = 16, fontweight = "bold")
+    ax.grid(ls = ":"); ax.legend(fontsize = 12); ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+
+
+def memory(R, title, path):
+    # (c) the peak of every step (solid) and what it holds after it (dotted)   |   (d) one step, layer by layer, with the peak of the timed steps (thin lines)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    fig, (c, d) = plt.subplots(1, 2, figsize = (16, 5.4))
+    for n, r in R.items():
+        color, ls = LINES[n]
+        c.plot(range(1, r["steps"] + 1), r["mem_gib"], color = color, ls = ls, lw = 2)
+        c.plot(range(1, r["steps"] + 1), r["held_gib"], color = color, ls = ":", lw = 1, alpha = 0.7)
+        y, top = [p[0] for p in r["trace"]], [p[1] for p in r["trace"]]
+        x = list(range(len(y))); x[-1] += max(1, len(y) // 25)        # room for the step
+        d.plot(x, y, color = color, ls = ls, lw = 2, label = LABELS[n]); d.axhline(r["peak"], color = color, lw = 0.8, alpha = 0.6)
+        d.fill_between(x, y, top, step = "pre", color = color, alpha = 0.12, lw = 0)   # short-lived peak between two points
+    c.axvspan(0.5, WARMUP + 0.5, color = "#ecebe6", zorder = 0)
+    c.text(WARMUP / 2 + 0.5, 0.03, "warmup (not timed)", transform = c.get_xaxis_transform(), ha = "center", color = "#666", fontsize = 11)
+    styles = [Line2D([], [], color = LINES[n][0], ls = LINES[n][1], lw = 2, label = LABELS[n]) for n in R]
+    styles += [Line2D([], [], color = "#555", lw = 2, label = "peak of the step"), Line2D([], [], color = "#555", ls = ":", lw = 1, label = "held after it")]
+    c.legend(handles = styles, ncol = 3, fontsize = 10, loc = "center right")
+    trace = next(iter(R.values()))["trace"]
+    at = {p[2]: i for i, p in enumerate(trace) if p[2]}
+    at["step"] = len(trace) - 1 + max(1, len(trace) // 25)
+    for (a, b), name, color in zip(((at["start"], at["loss"]), (at["loss"], at["backward"]), (at["backward"], at["step"])), ("forward", "backward", "step"), ("#eef3f8", "#f8eeee", "#edf5ef")):
+        d.axvspan(a, b, color = color, zorder = 0); d.text((a + b) / 2, 0.03, name, transform = d.get_xaxis_transform(), ha = "center", color = "#666", fontsize = 11)
+    d.set_xticks([at[k] for k in ("start", "loss", "backward", "step")], ["start", "loss", "backward", "step"])
+    for tick, ha in zip(d.get_xticklabels(), ("center", "center", "right", "left")): tick.set_ha(ha)
+    d.text(1, 1.01, "line: held at each point   shade: peak between two points   thin lines: peak of the timed steps", transform = d.transAxes, ha = "right", va = "bottom", color = "#666", fontsize = 10)
+    c.set_xlabel("Step", fontsize = 13); d.legend(fontsize = 11, loc = "upper left")
+    c.set_title("(c) Memory at every step", fontsize = 16, fontweight = "bold", loc = "left"); d.set_title("(d) Inside one step, layer by layer", fontsize = 16, fontweight = "bold", loc = "left")
+    for ax in (c, d): ax.set_ylabel("Memory (GiB)", fontsize = 13); ax.grid(ls = ":"); ax.spines[["top", "right"]].set_visible(False)
+    fig.suptitle(title, x = 0.01, ha = "left", color = "#666", fontsize = 11)
+    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+
+
+def table(R, desc):
+    p = next(iter(R.values()))
+    rows = [f"{desc}. Step time is the median of {p['steps'] - WARMUP} steps (± std), after {WARMUP} warmup steps.", "",
+            "| Method | Peak (GiB) | Step (ms) | TF/s |", "|---|:--:|:--:|:--:|"]
+    rows += [f"| {LABELS[n]} | {r['peak']:.2f} | {r['step_ms']:.1f} ± {r['step_std']:.1f} | {r['tflops']:.0f} ± {r['tflops_std']:.0f} |" for n, r in R.items()]
+    if "adamw" in R:
+        ref = R["adamw"]["losses"]
+        rows += ["", "| Method | Final loss | max \\|loss − vanilla AdamW\\| |", "|---|:--:|:--:|"]
+        rows += [f"| {LABELS[n]} | {r['losses'][-1]:.4f} | {max(abs(a - b) for a, b in zip(r['losses'], ref)):.4f} |" for n, r in R.items()]
+    return "\n".join(rows)
+
+
+def report(prefix, desc, loss_label):
+    R = {n: json.load(open(f"{OUT}/{prefix}_{n}.json")) for n in OPTIMIZERS if os.path.exists(f"{OUT}/{prefix}_{n}.json")}
+    desc = desc.format(params = f"{next(iter(R.values()))['params'] / 1e9:.2f}") + ", bf16 weights, single TPU"
+    headline(R, f"{OUT}/{prefix}_headline.png")
+    curves(R, "losses", loss_label, f"{prefix} : loss vs. training step", f"{OUT}/{prefix}_loss.png")
+    memory(R, desc, f"{OUT}/{prefix}_memory.png")
+    md = table(R, desc); open(f"{OUT}/{prefix}_table.md", "w").write(md + "\n"); print(md)
+
+
+def cli(prefix, make_model, make_data, loss_fn, flops, desc, loss_label):
+    # python <model>.py <optimizer> : train and measure one optimizer (one process each, so memory is clean)   |   python <model>.py report : plots + table
+    os.makedirs(OUT, exist_ok = True)
+    if sys.argv[1] == "report": report(prefix, desc, loss_label)
+    else: json.dump(measure(sys.argv[1], make_model, make_data(), loss_fn, flops), open(f"{OUT}/{prefix}_{sys.argv[1]}.json", "w"))
+
+
+if __name__ == "__main__":
+    cli("mlp", make_model, make_data, loss_fn, lambda params: 6 * params * BT,                     # 6 N FLOPs per token (forward 2, backward 4)
+        f"MLP {{params}}B params ({LAYERS} blocks, D={D}, FF={FF}), {BT} tokens per step", "Loss (MSE)")

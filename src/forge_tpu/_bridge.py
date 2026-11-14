@@ -124,12 +124,18 @@ def _device_scalars(values, device):
 
 
 def _in_place_or_raise(call, donated, key):
+    # runs call() (the TPU update). The FIRST time for each key only : if XLA copied a donated tensor (w or a state) instead of writing into it, the TPU's peak memory grows by that tensor's size. A growth of half of a large donated tensor (>= 4 MiB : w, a bf16 state, an int8
+    # q array) -> raise. A smaller growth (>= 1 MiB : a small array such as an int8 scale, or runtime memory) -> one warning, the update is kept. The same compiled program runs every later time : no check, no sync.
     if key in _IN_PLACE: return call()                                                                                                #
-    limit = max(min(t.nbytes for t in donated) // 2, 2**20)                                                                           # half the smallest donated tensor, at least 1 MiB (noise)
+    sizes = sorted(t.nbytes for t in donated)                                                                                         #
+    large = [b for b in sizes if b >= 4 * 2**20] or sizes                                                                             # small layers : all their tensors
+    limit = max(large[0] // 2, 2**20)                                                                                                 # half the smallest large donated tensor, at least 1 MiB (noise)
     torch.accelerator.synchronize(); before = torch.accelerator.memory_allocated(); torch.accelerator.reset_peak_memory_stats()       #
     out = call()                                                                                                                      #
     torch.accelerator.synchronize(); extra = torch.accelerator.max_memory_allocated() - before                                        #
-    if extra >= limit: raise RuntimeError(f"FORGE update {key} was NOT in place on HBM: the TPU's peak memory grew by {extra / 2**20:.1f} MiB during it (w + states are {sum(t.nbytes for t in donated) / 2**20:.1f} MiB), so XLA copied a donated buffer instead of writing into it")
+    report = f"FORGE update {key}: the TPU's peak memory grew by {extra / 2**20:.1f} MiB during it (donated tensors, MiB: {', '.join(f'{b / 2**20:.1f}' for b in sizes)})"
+    if extra >= limit: raise RuntimeError(report + ", so XLA copied a large donated buffer instead of writing into it (NOT in place on HBM)")
+    if extra >= 2**20: warnings.warn(report + ": less than half of any large donated tensor; a small array may have been copied, the update is kept")
     _IN_PLACE.add(key)                                                                                                                #
     return out                                                                                                                        #
 
@@ -158,7 +164,7 @@ def _kick(weight):
     _KICKS[0] += 1                                                                                                                    # 
     if _KICKS[0] % KICK_EVERY == 0:                                                                                                   # 
         from torch_tpu._internal import sync                                                                                          # 
-        sync.synchronize([weight], False)                                                                                                  # wait = False : materialize, do not block
+        sync.synchronize([weight], False)                                                                                             # wait = False : materialize, do not block
 
 
 

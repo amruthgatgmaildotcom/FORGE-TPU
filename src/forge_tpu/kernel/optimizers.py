@@ -33,7 +33,7 @@ import jax.numpy as jnp
 
 class AdamW:
 
-    name, states, floors = "adamw", ("m", "v"), {"v": 1e-8}                                                                           # we need floor only for "v", cuz in the adamw update we
+    name, states, floors = "adamw", ("m", "v"), {"v": 1e-10}                                                                           # we need floor only for "v", cuz in the adamw update we
     defaults = {'lr': 1e-4, 'beta1': 0.9, 'beta2': 0.999, 'eps': 1e-8, 'weight_decay': 0.01}                                          # divide by v, we dont want to divide by 0
     # these are static members                                                                                                        #
 
