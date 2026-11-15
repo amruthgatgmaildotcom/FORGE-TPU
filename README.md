@@ -43,7 +43,7 @@ Step time is the median of the timed steps. The first 10 steps are not timed.
 
 For each model there are three plots:
 
-1. Peak memory and memory vs. speed.
+1. Memory right before `backward()` and when it ends (weights, states, activations, weight gradient), and memory vs. speed.
 2. Loss at each training step.
 3. Memory at each step, and memory inside one step, layer by layer.
 
@@ -88,29 +88,26 @@ For each model there are three plots:
 
 ## Correctness
 
-`benchmarks/tests.py` compares FORGE with `torch.optim.AdamW`.
-
+`benchmarks/tests.py` compares FORGE against `torch.optim.AdamW`. (fully AI generated code)
 - FORGE (bf16) gives the same result as PyTorch: each weight and state is within 1 bf16 ulp.
 - On the MLP, the FORGE (bf16) loss and the fused AdamW loss are almost the same (max difference 0.0005).
 
 ## Tiles
 
 The kernel uses one tile size `(bv, bh, bbt)` for every layer (`DEFAULT_TILES` in `src/forge_tpu/kernel/_utils.py`).
-`benchmarks/colab_cell_tiler.py` times many tile sizes on every fused layer shape of the three models and reports the fastest. It changes nothing.
+`benchmarks/colab_cell_tiler.py` times many tile sizes on every fused layer shape of the three models and reports the fastest. It changes nothing. (fully AI generated code).
+(1024, 1024, 1024) performed best.
+
+## Profile
+
+- `benchmarks/profiling.py` shows where the time of one training step goes, for the same models and methods (fully AI generated code)
+- `profile_<model>_timeline.png`: one step on a time axis. For each method, the step as the benchmark runs it (when Python has issued each phase, and when the TPU is done), and the same step with a sync after each phase (fully AI generated code)
+- `profile_<model>_table.md`: the same numbers as a table.
 
 ## Known limits
 
 - `torch.compile` doesnt work.
-- Only AdamW. States are bf16 or int8. int8 states need `out_features % 64 == 0`.
-- FORGE updates the weight only. A bias gets a `.grad`: give it to a torch optimizer (FusedLinear gives a warning).
+- Only AdamW as of now. States are bf16 or int8 (thats all v5e- supports). int8 states need `out_features % 64 == 0`.
+- FORGE updates the weight and states of a Linear layer only as of now. update of everything else happens in torch's optimizer.step()
 - Do not move or convert the model (`.to()`) after the first training forward: the optimizer state stays with the old weight.
 
-API that FORGE (dk4248) has and this repository does not have:
-
-- No `FusedOptimizerManager`. Do these by hand:
-  - LR schedule: set `layer.fusedStateObject.hparams["lr"]` on every FusedLinear before the forward (no recompile).
-  - Parameters for the torch optimizer: all parameters that are not a FusedLinear weight (see `benchmarks/llama.py`).
-  - Checkpoint: `layer.fusedStateObject.state_dict()` and `load_state_dict()` for each layer. `model.state_dict()` does not hold the optimizer states.
-- No gradient accumulation: each `backward()` is one update.
-- No per-layer switch back to a normal matmul and a separate optimizer kernel (`use_fused_backward = False`).
-- No automatic tile tuning (see Tiles).

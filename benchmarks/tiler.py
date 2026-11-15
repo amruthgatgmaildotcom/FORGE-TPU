@@ -1,4 +1,4 @@
-import itertools, json, math, os, statistics, sys, time, torch
+import itertools, json, math, os, sys, time, torch
 import jax.numpy as jnp
 from forge_tpu import _bridge, kernel
 
@@ -13,7 +13,7 @@ MODELS = {"mlp":   (4096, {(16384, 4096): 8, (4096, 16384): 8, (4096, 4096): 1})
 BV, BH, BBT = (512, 1024, 2048), (512, 1024, 2048), (512, 1024, 2048)  # every combination is tried (cut to the layer : bv <= V, bh <= H, bbt <= BT)
 DEFAULT = kernel._utils.DEFAULT_TILES
 VMEM = 64 * 2**20                                                      # the kernel's limit (kernel/_utils.py compiler_params). A triple that needs more (rough count, see fits) is not tried
-REPS, WARM = 5, 2                                                      # ms of a triple = median of REPS updates, after WARM updates (the first one compiles)
+REPS, WARM = 5, 2                                                      # ms of a triple = REPS updates in a row / REPS, after WARM updates (the first one compiles)
 MAX_SECONDS, INT8_SHARE = float(os.environ.get("MAX_SECONDS", 200)), 0.2   # per model. bf16 states get 1 - INT8_SHARE of it, then int8 states : only the default and the best bf16 triple
 OUT = os.environ.get("RESULTS", "results")
 
@@ -38,22 +38,28 @@ def sync():
     if DEVICE == "tpu": torch.accelerator.synchronize()
 
 def update(scalars, go, x, w, flat, mode, tiles):
+    tiles = "x".join(map(str, tiles))                                  # _bridge takes the tiles as a string
     # one fused update with these tiles, as _bridge.fused_update does it (without the replay, the same for every triple). Returns [w, *states], the old ones are given away
     if DEVICE == "tpu": return _bridge._run_jax_op("adamw", mode, tiles)(_bridge._device_scalars(tuple(scalars), w.device), [go, x], w, flat)
     out = _bridge._run(jnp.asarray(scalars, jnp.float32), [_bridge._to_jax(go), _bridge._to_jax(x)], _bridge._to_jax(w), [_bridge._to_jax(t) for t in flat], optimizer = "adamw", state_mode = mode, interpret = True, tiles = tiles)
     return [_bridge._to_torch(a) for a in out]                         # cpu : interpret mode, only to test this file without a TPU
 
-def time_tiles(go, x, w0, mode, tiles):
-    # ms of one fused update (median of REPS), or the error text if these tiles do not compile / run
+def read(w):
+    # torch_tpu only queues a fused update : it runs when something needs its result. Reading one value of the last w runs every update before it (each w is the input of the next)
+    sync(); return w[0, 0].item()
+
+def time_tiles(layer, mode, tiles):
+    # ms of one fused update (REPS updates in a row, then one read, / REPS), or the error text if these tiles do not compile / run
+    # layer = (w, go, x) on the CPU. They go to the TPU again for every triple : the update gives w away (donation), and on the TPU w0.clone() can share w0's buffer,
+    # so with one w0 on the TPU the first triple gave w0 away and every later triple failed ("a required argument is in a failed state")
     opt = kernel.OPTIMIZERS["adamw"]
     try:
-        w = w0.clone()
-        flat, times = _bridge._flatten(_bridge.allocate_state(w, "adamw", mode), "adamw"), []
-        for step in range(1, WARM + REPS + 1):
-            sync(); t0 = time.perf_counter()
-            w, *flat = update(opt.scalars(opt.defaults, step), go, x, w, flat, mode, tiles)
-            sync(); times.append((time.perf_counter() - t0) * 1e3)
-        return statistics.median(times[WARM:])
+        w, go, x = (t.to(DEVICE, DTYPE) for t in layer)
+        flat = _bridge._flatten(_bridge.allocate_state(w, "adamw", mode), "adamw")
+        for step in range(1, WARM + 1): w, *flat = update(opt.scalars(opt.defaults, step), go, x, w, flat, mode, tiles)
+        read(w); t0 = time.perf_counter()                              # the compile and the warm updates are done here
+        for step in range(WARM + 1, WARM + REPS + 1): w, *flat = update(opt.scalars(opt.defaults, step), go, x, w, flat, mode, tiles)
+        read(w); return (time.perf_counter() - t0) * 1e3 / REPS
     except Exception as error: return f"{type(error).__name__}: {str(error)[:200]}"
 
 def measure(name):
@@ -62,21 +68,22 @@ def measure(name):
     left = lambda: MAX_SECONDS - (time.perf_counter() - start)
     for n, ((V, H), count) in enumerate(shapes.items()):
         g = torch.Generator().manual_seed(0)
-        w0 = (torch.randn(V, H, generator = g) * 0.02).to(DEVICE, DTYPE)                                             # as a real layer : std 0.02 weights, small go
-        go, x = (torch.randn(BT, V, generator = g) * 1e-3).to(DEVICE, DTYPE), torch.randn(BT, H, generator = g).to(DEVICE, DTYPE)
+        layer = (torch.randn(V, H, generator = g) * 0.02, torch.randn(BT, V, generator = g) * 1e-3, torch.randn(BT, H, generator = g))   # w, go, x on the CPU. as a real layer : std 0.02 weights, small go
+        errors = 0                                                     # errors in a row
         S = {"V": V, "H": H, "count": count, "bf16": {}, "int8": {}}; R["shapes"].append(S)
         stop = time.perf_counter() + (1 - INT8_SHARE) * left() / (len(shapes) - n)   # this shape's share of the time that is left, less the part kept for int8
         for i, tiles in enumerate(candidates(BT, V, H)):
             if i and time.perf_counter() > stop: break                 # the default triple is always timed
-            S["bf16"]["x".join(map(str, tiles))] = ms = time_tiles(go, x, w0, "bf16", tiles)
+            S["bf16"]["x".join(map(str, tiles))] = ms = time_tiles(layer, "bf16", tiles)
             print(f"{name} V={V} H={H} bf16 tiles {tiles} : " + (f"{ms:8.3f} ms" if isinstance(ms, float) else ms), flush = True)
             json.dump(R, open(path, "w"))                              # after every triple : a crash loses nothing
+            errors = 0 if isinstance(ms, float) else errors + 1
+            if errors == 3: sys.exit(f"STOP {name} : 3 errors in a row, the TPU state may be broken. The times above are kept")   # do not spend the TPU time on more errors
         ok = {t: ms for t, ms in S["bf16"].items() if isinstance(ms, float)}
         for t in dict.fromkeys(["x".join(map(str, cut(DEFAULT, BT, V, H)))] + ([min(ok, key = ok.get)] if ok else [])):   # int8 : the default and the best bf16 triple
-            S["int8"][t] = ms = time_tiles(go, x, w0, "int8", tuple(map(int, t.split("x"))))
+            S["int8"][t] = ms = time_tiles(layer, "int8", tuple(map(int, t.split("x"))))
             print(f"{name} V={V} H={H} int8 tiles {t} : " + (f"{ms:8.3f} ms" if isinstance(ms, float) else ms), flush = True)
             json.dump(R, open(path, "w"))
-        del w0, go, x
 
 
 #------------------------------------------------------------------------- report --------------------------------------------------------------------------#

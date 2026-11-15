@@ -56,13 +56,15 @@ def state_bytes(model, opt):                                           # torch A
 
 
 def layer_trace(model, opt, batch, loss_fn, base):
-    # one more step (not timed) : memory after every Linear / Embedding in the forward, before each of their backwards, and at loss, end of backward, step.
+    # one more step (not timed) : memory after every leaf module (Linear, Embedding, norm, activation, ...) in the forward, before each of their backwards, and at loss, end of backward, step.
     # Each point is (memory held at the point, peak since the point before) : the peak also shows short-lived tensors (inside an op, the loss, the step)
     acc, points, hooks = torch.accelerator, [], []
     def mark(label = ""):
         acc.synchronize(); points.append(((acc.memory_allocated() - base) / GiB, (acc.max_memory_allocated() - base) / GiB, label)); acc.reset_peak_memory_stats()
-    def after_forward(module, inputs, out): mark(); hooks.append(out.register_hook(lambda grad: mark()))
-    hooks += [m.register_forward_hook(after_forward) for m in model.modules() if isinstance(m, (nn.Linear, FusedLinear, nn.Embedding))]
+    def after_forward(module, inputs, out):
+        mark()
+        if torch.is_tensor(out) and out.requires_grad: hooks.append(out.register_hook(lambda grad: mark()))   # a tuple (e.g. RoPE's cos, sin) or a tensor with no grad : no backward point
+    hooks += [m.register_forward_hook(after_forward) for m in model.modules() if not any(m.children())]   # every leaf module : the more points, the more precise the line
     x, y = batch
     mark(); points.clear()                                             # starts the peak count
     mark("start"); loss = loss_fn(model(x), y); mark("loss"); loss.backward(); mark("backward")
@@ -110,25 +112,37 @@ PARTS = {"weights": ("weights", "#2f7ed8"), "states": ("opt states", "#1db07a"),
 RED = "#c62828"
 
 
+def at_point(r, label, grads):
+    # memory held at one point of the traced step (layer_trace : "loss" = right before backward() starts, "backward" = right when it ends), in parts.
+    # weights and states are held all the time, grads = weight gradients live at that point, activations = the rest (activations, logits, ...)
+    held = next(p[0] for p in r["trace"] if p[2] == label)
+    parts = {"weights": r["weights"], "states": r["states"], "grads": grads}
+    return held, {**parts, "activations": max(held - sum(parts.values()), 0.0)}
+
+
 def headline(R, path):
     import matplotlib.pyplot as plt
     names = list(R)
-    fig, (a, b) = plt.subplots(1, 2, figsize = (14, 5.6), gridspec_kw = {"width_ratios": [1.05, 1]})
-    # (a) peak memory, stacked
+    fig, (a1, a2, b) = plt.subplots(1, 3, figsize = (21, 5.6), gridspec_kw = {"width_ratios": [1, 1, 1]})
+    # (a) and (b) : memory held right before backward() starts (no weight gradient exists yet) and when it ends (torch : all weight gradients), stacked
+    points = [(a1, "loss", "(a) Right before backward()", lambda n: 0.0), (a2, "backward", "(b) When backward() ends", lambda n: R[n]["grads"])]
+    totals = {(label, n): at_point(R[n], label, grads(n)) for _, label, _, grads in points for n in names}
+    top = max(t for t, _ in totals.values()) * 1.35
     forge = [i for i, n in enumerate(names) if n.startswith("forge")]
-    if forge: a.axvspan(min(forge) - 0.5, max(forge) + 0.5, color = "#e8f4ea", zorder = 0)
-    bottom = [0.0] * len(names)
-    for key, (label, color) in PARTS.items():
-        h = [max(R[n][key], 0) for n in names]
-        a.bar(range(len(names)), h, 0.62, bottom = bottom, color = color, label = label, zorder = 2)
-        bottom = [s + v for s, v in zip(bottom, h)]
-    for i, n in enumerate(names): a.text(i, R[n]["peak"] * 1.01, f"{R[n]['peak']:.1f}", ha = "center", va = "bottom", fontsize = 14, fontweight = "bold")
-    a.set_xticks(range(len(names)), [LABELS[n].replace(" ", "\n") for n in names], fontsize = 13)
-    for tick, n in zip(a.get_xticklabels(), names): tick.set_fontweight("bold" if n.startswith("forge") else "normal")
-    a.set_ylim(0, max(R[n]["peak"] for n in names) * 1.35); a.set_xlim(-0.5, len(names) - 0.5)
-    a.set_ylabel("Peak memory (GiB)", fontsize = 13); a.set_title("(a) Peak memory", fontsize = 17, fontweight = "bold")
-    a.grid(axis = "y", ls = ":", zorder = 1); a.legend(fontsize = 12, loc = "upper right")
-    # (b) memory vs speed
+    for a, label, title, _ in points:
+        if forge: a.axvspan(min(forge) - 0.5, max(forge) + 0.5, color = "#e8f4ea", zorder = 0)
+        bottom = [0.0] * len(names)
+        for key, (part, color) in PARTS.items():
+            h = [totals[(label, n)][1][key] for n in names]
+            a.bar(range(len(names)), h, 0.62, bottom = bottom, color = color, label = part, zorder = 2)
+            bottom = [s + v for s, v in zip(bottom, h)]
+        for i, n in enumerate(names): a.text(i, totals[(label, n)][0] * 1.01, f"{totals[(label, n)][0]:.1f}", ha = "center", va = "bottom", fontsize = 14, fontweight = "bold")
+        a.set_xticks(range(len(names)), [LABELS[n].replace(" ", "\n") for n in names], fontsize = 13)
+        for tick, n in zip(a.get_xticklabels(), names): tick.set_fontweight("bold" if n.startswith("forge") else "normal")
+        a.set_ylim(0, top); a.set_xlim(-0.5, len(names) - 0.5)
+        a.set_ylabel("Memory held (GiB)", fontsize = 13); a.set_title(title, fontsize = 17, fontweight = "bold")
+        a.grid(axis = "y", ls = ":", zorder = 1); a.legend(fontsize = 12, loc = "upper right")
+    # (c) memory vs speed (the peak of the timed steps)
     for n in names:
         big = n.startswith("forge")
         b.scatter(R[n]["peak"], R[n]["step_ms"], s = 260 if big else 70, color = COLORS[n], zorder = 3)
@@ -144,8 +158,8 @@ def headline(R, path):
     pad_x, pad_y = (max(xs) - min(xs)) * 0.35 + 0.5, (max(ys) - min(ys)) * 0.25 + 1
     b.set_xlim(max(xs) + pad_x, min(xs) - pad_x); b.set_ylim(max(ys) + pad_y, min(ys) - pad_y)  # both inverted : better is up and right
     b.set_xlabel("Peak memory (GiB)  ←  smaller", fontsize = 13); b.set_ylabel("Step time (ms)  ↑  faster", fontsize = 13)
-    b.set_title("(b) Memory vs. speed", fontsize = 17, fontweight = "bold"); b.grid(ls = ":")
-    for ax in (a, b): ax.spines[["top", "right"]].set_visible(False); ax.tick_params(labelsize = 12)
+    b.set_title("(c) Memory vs. speed", fontsize = 17, fontweight = "bold"); b.grid(ls = ":")
+    for ax in (a1, a2, b): ax.spines[["top", "right"]].set_visible(False); ax.tick_params(labelsize = 12)
     fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
 
 
@@ -169,8 +183,8 @@ def memory(R, title, path):
         c.plot(range(1, r["steps"] + 1), r["held_gib"], color = color, ls = ":", lw = 1, alpha = 0.7)
         y, top = [p[0] for p in r["trace"]], [p[1] for p in r["trace"]]
         x = list(range(len(y))); x[-1] += max(1, len(y) // 25)        # room for the step
-        d.plot(x, y, color = color, ls = ls, lw = 2, label = LABELS[n]); d.axhline(r["peak"], color = color, lw = 0.8, alpha = 0.6)
-        d.fill_between(x, y, top, step = "pre", color = color, alpha = 0.12, lw = 0)   # short-lived peak between two points
+        d.plot(x, y, color = color, ls = ls, lw = 1.5, label = LABELS[n], drawstyle = "steps-post"); d.axhline(r["peak"], color = color, lw = 0.8, alpha = 0.6)   # no slope between two points : held memory stays flat until the next point, then jumps
+        d.fill_between(x, y[:1] + y[:-1], top, step = "pre", color = color, alpha = 0.12, lw = 0)   # between two points : from what was held at the first one up to the peak in between
     c.axvspan(0.5, WARMUP + 0.5, color = "#ecebe6", zorder = 0)
     c.text(WARMUP / 2 + 0.5, 0.03, "warmup (not timed)", transform = c.get_xaxis_transform(), ha = "center", color = "#666", fontsize = 11)
     styles = [Line2D([], [], color = LINES[n][0], ls = LINES[n][1], lw = 2, label = LABELS[n]) for n in R]
@@ -183,7 +197,7 @@ def memory(R, title, path):
         d.axvspan(a, b, color = color, zorder = 0); d.text((a + b) / 2, 0.03, name, transform = d.get_xaxis_transform(), ha = "center", color = "#666", fontsize = 11)
     d.set_xticks([at[k] for k in ("start", "loss", "backward", "step")], ["start", "loss", "backward", "step"])
     for tick, ha in zip(d.get_xticklabels(), ("center", "center", "right", "left")): tick.set_ha(ha)
-    d.text(1, 1.01, "line: held at each point   shade: peak between two points   thin lines: peak of the timed steps", transform = d.transAxes, ha = "right", va = "bottom", color = "#666", fontsize = 10)
+    d.set_xlabel("line : held at each point   shade : peak between two points   thin lines : peak of the timed steps", color = "#666", fontsize = 10)   # under the plot : at the top it ran into the title
     c.set_xlabel("Step", fontsize = 13); d.legend(fontsize = 11, loc = "upper left")
     c.set_title("(c) Memory at every step", fontsize = 16, fontweight = "bold", loc = "left"); d.set_title("(d) Inside one step, layer by layer", fontsize = 16, fontweight = "bold", loc = "left")
     for ax in (c, d): ax.set_ylabel("Memory (GiB)", fontsize = 13); ax.grid(ls = ":"); ax.spines[["top", "right"]].set_visible(False)

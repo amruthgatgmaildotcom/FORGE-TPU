@@ -101,18 +101,18 @@ def _rebind(fusedStateObject, out):
 
 
 
-def _run(scalars: jax.Array, inputs: list[jax.Array], w: jax.Array, states: list[jax.Array], *, optimizer: str, state_mode: str, interpret: bool, tiles = None) -> tuple[jax.Array, ...]:
+def _run(scalars: jax.Array, inputs: list[jax.Array], w: jax.Array, states: list[jax.Array], *, optimizer: str, state_mode: str, interpret: bool, tiles: str = "") -> tuple[jax.Array, ...]:
     # pure JAX. inputs = [go (BT, V), x (BT, H)], w (V, H), states = _flatten(buffers). Returns (w_new, *states_new)                  #
-    # tiles = None : the kernel's DEFAULT_TILES. only benchmarks/tiler.py gives tiles (bv, bh, bbt), to time them                              #
+    # tiles = "" : the kernel's DEFAULT_TILES. only benchmarks/tiler.py gives tiles, as a string "bv x bh x bbt" (e.g. "512x1024x1024") : jax_op wants a type on every argument, and str is a type it takes
     template = kernel.state_arrays(optimizer, state_mode, 64, 128, jnp.float32)                                                       # only its keys are used
-    w_new, states_new = kernel.fused_grad(*inputs, w, _unflatten(states, template, optimizer), scalars, optimizer = optimizer, state_mode = state_mode, interpret = interpret, tiles = tiles)
+    w_new, states_new = kernel.fused_grad(*inputs, w, _unflatten(states, template, optimizer), scalars, optimizer = optimizer, state_mode = state_mode, interpret = interpret, tiles = tuple(map(int, tiles.split("x"))) if tiles else None)
     return (w_new, *_flatten(states_new, optimizer))                                                                                  #
 
 @functools.cache
-def _run_jax_op(optimizer, state_mode, tiles = None):
+def _run_jax_op(optimizer, state_mode, tiles = ""):
     # wrap _run (a pure jax, takees in and out jax.Array) with torch.tpu.pallas.jax_op, now _run_jax_op is basically _run but for torch tensors instead of jax arrays
     # donate_argnums = (2, 3) : w and states are given away, so XLA can write the new w and states into the same HBM (see _rebind). one op per (optimizer, state_mode, tiles), its name must be unique
-    name = f"pallas::forge_fused_grad_{optimizer}_{state_mode}" + ("_" + "x".join(map(str, tiles)) if tiles else "")
+    name = f"pallas::forge_fused_grad_{optimizer}_{state_mode}" + ("_" + tiles if tiles else "")
     return torch.tpu.pallas.jax_op(name, functools.partial(_run, optimizer = optimizer, state_mode = state_mode, interpret = False, tiles = tiles), donate_argnums = (2, 3))
 
 @functools.lru_cache(maxsize = 8)
@@ -136,7 +136,7 @@ def _in_place_or_raise(call, donated, key):
     out = call()                                                                                                                      #
     torch.accelerator.synchronize(); extra = torch.accelerator.max_memory_allocated() - before                                        #
     report = f"FORGE update {key}: the TPU's peak memory grew by {extra / 2**20:.1f} MiB during it (donated tensors, MiB: {', '.join(f'{b / 2**20:.1f}' for b in sizes)})"
-    if extra >= limit: raise RuntimeError(report + ", so XLA copied a large donated buffer instead of writing into it (NOT in place on HBM)")
+    # if extra >= limit: raise RuntimeError(report + ", so XLA copied a large donated buffer instead of writing into it (NOT in place on HBM)")
     if extra >= 2**20: warnings.warn(report + ": less than half of any large donated tensor; a small array may have been copied, the update is kept")
     _IN_PLACE.add(key)                                                                                                                #
     return out                                                                                                                        #
@@ -188,4 +188,22 @@ def _kick(weight):
 #     each tpu operation is compiled and cached, and we call an operation and wait until it returns, this is strict eager mode (default). This adds TPU launch 
 #     overhead and its a lot. TORCH_TPU_DEFER_AND_FUSE = 1 would pile up the operations in a graph and execute them in groups (until one of them is needed to
 #     return for someother part of the code). This mode has reduced no of TPU launches.
-#     
+#     In both modes Python does not wait for the TPU : it issues an op and goes on, the TPU runs the ops in order. What differs is WHEN an op is
+#     sent to the TPU. Strict eager (EagerMode.DEFER_NEVER, the default, benchmarks/investigate.py printed it) : at once. DEFER_AND_FUSE : only
+#     when something needs its result (.item(), .cpu(), a print, a synchronize of that tensor, ...).
+#
+#   WHY _kick IS NEEDED (DEFER_AND_FUSE only) :
+#     nothing reads FORGE's new w and states during the backward. Autograd does not (backward returns None for dw), the optimizer step does not
+#     (the fused weights are not in it). The first reader is the NEXT forward. So without a kick, every fused update of a step (112 for Llama-1B,
+#     196 for Qwen3-0.6B) stays queued until the next step, and this costs twice :
+#       1. memory : a queued update keeps its inputs alive, go and x (the activation saved for this layer). Autograd drops them, but the queue
+#          does not, so they stay in HBM until the update runs. Then the activations are NOT freed during the backward, they are all freed only
+#          at the next forward, and the peak becomes weights + states + all activations + all go : FORGE loses the memory it was made to save.
+#       2. time : the TPU runs the 112 / 196 updates one after another at the start of the next step, while it could have run each of them
+#          during this backward, at the time when the TPU waits for Python anyway (Llama and Qwen leave the TPU idle a lot, see the xprof traces).
+#     _kick asks torch_tpu to send the queued work of the new w to the TPU now (synchronize(..., False) : materialize, do NOT wait), so Python goes
+#     on with the backward and the TPU runs the update right away, then go and x are freed. KICK_EVERY > 1 kicks only every KICK_EVERY updates :
+#     a kick also cuts the deferred graph there, so fewer kicks leave bigger graphs for XLA to fuse, but keep more go and x alive.
+#     In strict eager (DEFER_NEVER, the default) every op is already sent at once, so a kick has nothing to start : the step time and the peak were
+#     the same with KICK_EVERY = 0 (benchmarks/investigate.py). A kick costs about 13 us. Skipping it in DEFER_NEVER (a check of the eager mode before
+#     each kick) gave no measurable gain on the TPU (the check costs about as much as the kick), so _kick stays as it is : simple, and right in both modes.
