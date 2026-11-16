@@ -44,7 +44,7 @@ def make_model(name, seed = 0):
                 if isinstance(child, nn.Linear): setattr(parent, child_name, FusedLinear.from_linear(child, state_mode = mode, lr = LR, weight_decay = WD))
         fused = {id(m.weight) for m in model.modules() if isinstance(m, FusedLinear)}
         params = [p for p in model.parameters() if id(p) not in fused]
-    return model, torch.optim.AdamW(params or model.parameters(), lr = LR, weight_decay = WD, foreach = False, fused = name != "adamw")
+    return model, torch.optim.AdamW(params or model.parameters(), lr = LR, weight_decay = WD, fused = name != "adamw")
 
 
 def loss_fn(out, y): return F.cross_entropy(out.logits.flatten(0, 1).float(), y.flatten())   # out : transformers' output object

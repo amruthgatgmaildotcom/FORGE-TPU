@@ -40,7 +40,7 @@ def make_model(name, seed = 0):
             for child_name, child in parent.named_children():
                 if isinstance(child, nn.Linear): setattr(parent, child_name, FusedLinear.from_linear(child, state_mode = mode, lr = LR, weight_decay = WD))
         return model, None
-    return model, torch.optim.AdamW(model.parameters(), lr = LR, weight_decay = WD, foreach = False, fused = name == "adamw_fused")
+    return model, torch.optim.AdamW(model.parameters(), lr = LR, weight_decay = WD, fused = name == "adamw_fused")   # foreach : torch's default, as the FORGE GPU code uses
 
 
 def loss_fn(out, y): return F.mse_loss(out.float(), y.float())
@@ -211,9 +211,10 @@ def table(R, desc):
             "| Method | Peak (GiB) | Step (ms) | TF/s |", "|---|:--:|:--:|:--:|"]
     rows += [f"| {LABELS[n]} | {r['peak']:.2f} | {r['step_ms']:.1f} ± {r['step_std']:.1f} | {r['tflops']:.0f} ± {r['tflops_std']:.0f} |" for n, r in R.items()]
     if "adamw" in R:
-        ref = R["adamw"]["losses"]
-        rows += ["", "| Method | Final loss | max \\|loss − vanilla AdamW\\| |", "|---|:--:|:--:|"]
-        rows += [f"| {LABELS[n]} | {r['losses'][-1]:.4f} | {max(abs(a - b) for a, b in zip(r['losses'], ref)):.4f} |" for n, r in R.items()]
+        # each run stops at STEPS or MAX_SECONDS, so the runs have different lengths : compare all of them at the last step that every run has
+        ref, last = R["adamw"]["losses"], min(r["steps"] for r in R.values())
+        rows += ["", f"| Method | Loss at step {last} (last common step) | max \\|loss − vanilla AdamW\\| (steps 1 to {last}) |", "|---|:--:|:--:|"]
+        rows += [f"| {LABELS[n]} | {r['losses'][last - 1]:.4f} | {max(abs(a - b) for a, b in zip(r['losses'][:last], ref[:last])):.4f} |" for n, r in R.items()]
     return "\n".join(rows)
 
 

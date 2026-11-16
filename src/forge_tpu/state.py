@@ -52,8 +52,15 @@ class FusedOptimizerState:
 
     def ensure_buffers(self, weight):
         # binds the weight and allocates the space on HBM for the optimizer states (once), self.buffers become {str : {str : tensor, }, }
+        # Called at every training forward : the module can get a NEW Parameter after the first one (.to() a TPU, load_state_dict(assign = True), ...).
+        # Then the update must go to the new Parameter, else the module's weight never changes (the old one is updated, silently). The states are kept
+        # (moved to the new weight's device if it changed), the shape must be the same
         if self.buffers is None:
             self.weight, self.buffers = weight, _bridge.allocate_state(weight, self.optimizer_type, self.state_mode)
+        elif weight is not self.weight:
+            if weight.shape != self.weight.shape: raise RuntimeError(f"FusedLinear got a new weight of shape {tuple(weight.shape)}, its optimizer states are for {tuple(self.weight.shape)}")
+            if weight.device != self.weight.device: self.buffers = _map(self.buffers, lambda tensoR: tensoR.to(weight.device))
+            self.weight = weight
 
     def increment_step(self):                                                                                                       #
         # we also maintain how many times this layer has been updated (AdamW needs it for the bias correction, see optimizers.py)

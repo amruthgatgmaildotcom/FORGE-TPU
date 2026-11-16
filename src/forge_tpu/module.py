@@ -55,7 +55,7 @@ class FusedLinear(nn.Module):
 
     def forward(self, x):
         if not self.training: return F.linear(x, self.weight, self.bias)                                                             # returns y = x @ self.weight.T + self.bias
-        self.fusedStateObject.ensure_buffers(self.weight)                                                                            # first training forward only : m, v on the weight's final device
+        self.fusedStateObject.ensure_buffers(self.weight)                                                                            # m, v at the first training forward, the weight bound again if it is a new Parameter
         return FusedLinearFunction.apply(x, self.weight, self.bias, self.fusedStateObject)                                           # so each associated tensor now knows that .backward is in FusedLinearFunction
         # apply calls forward, and inside apply's ctx we can store anything, and when FusedLinearFunction.backward is called it can use whats stored in ctx, and backward also called fused_update
         # and fused_update needs to know optimizer details, and optimizer details are NOT typically found with nn.Linear, but FORGE forces our design choice to store optimizer details with FusedLinear
