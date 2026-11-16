@@ -22,7 +22,7 @@
 
 | Name | .... |
 |---|---|
-| vanilla AdamW | `torch.optim.AdamW(foreach=False)`, bf16 weights, bf16 states |
+| vanilla AdamW | `torch.optim.AdamW()` (torch's defaults), bf16 weights, bf16 states |
 | fused AdamW | `torch.optim.AdamW(fused=True)`, bf16 weights, bf16 states |
 | FORGE (bf16) | FORGE, bf16 weights, bf16 states |
 | FORGE (int8) | FORGE, bf16 weights, int8 states |
@@ -61,9 +61,9 @@ for each model there are three plots :
 | FORGE (bf16) | 10.66 | 195.5 ± 0.1 | 137 |
 | FORGE (int8) | 8.76 | 195.5 ± 0.1 | 137 |
 
-![MLP headline](results/mlp/mlp_headline.png)
-![MLP loss](results/mlp/mlp_loss.png)
-![MLP memory](results/mlp/mlp_memory.png)
+![MLP headline](results/adamw/mlp/mlp_headline.png)
+![MLP loss](results/adamw/mlp/mlp_loss.png)
+![MLP memory](results/adamw/mlp/mlp_memory.png)
 
 ### Llama-3.2-1B
 
@@ -74,9 +74,9 @@ for each model there are three plots :
 | FORGE (bf16) | 11.31 | 170.6 ± 10.1 | 47 |
 | FORGE (int8) | 9.56 | 179.7 ± 8.4 | 45 |
 
-![Llama headline](results/llama/llama_headline.png)
-![Llama loss](results/llama/llama_loss.png)
-![Llama memory](results/llama/llama_memory.png)
+![Llama headline](results/adamw/llama/llama_headline.png)
+![Llama loss](results/adamw/llama/llama_loss.png)
+![Llama memory](results/adamw/llama/llama_memory.png)
 
 ### Qwen3-0.6B
 
@@ -87,9 +87,9 @@ for each model there are three plots :
 | FORGE (bf16) | 8.10 | 381.4 ± 56.2 | 11 |
 | FORGE (int8) | 7.33 | 431.7 ± 33.7 | 10 |
 
-![Qwen headline](results/qwen/qwen_headline.png)
-![Qwen loss](results/qwen/qwen_loss.png)
-![Qwen memory](results/qwen/qwen_memory.png)
+![Qwen headline](results/adamw/qwen/qwen_headline.png)
+![Qwen loss](results/adamw/qwen/qwen_loss.png)
+![Qwen memory](results/adamw/qwen/qwen_memory.png)
 
 TF/s = model FLOPs of one step (6 x params x tokens, + attention) / step time. the v5e peak is 197 TF/s in bf16.
 
@@ -135,13 +135,15 @@ src/forge_tpu/
 benchmarks/
   mlp.py llama.py qwen.py     the models + the measure / report code (mlp.py has the shared part)
   tests.py profiling.py tiler.py
-  colab_cell_*.py             one Colab cell each
-results/                      the latest results zip, unpacked
+  methods.py                  the optimizers of the benchmarks and their methods (OPTIM : adamw or sgd)
+  colab_cell_*.py             one Colab cell each (OPTIMS at the top : the optimizers to run)
+results/adamw/                the latest AdamW results zip, unpacked (README.md : this file with paths for that folder)
+results/sgd/                  the latest SGD results
 ```
 
 ## Known limits
 
 - `torch.compile` doesnt work. (set_ is not tracable, i found no alternative)
-- only AdamW as of now. states are bf16 or int8 (thats all v5e supports natively). int8 states need `out_features % 64 == 0`.
+- only AdamW and SGD (no momentum) as of now. AdamW states are bf16 or int8 (thats all v5e supports natively). int8 states need `out_features % 64 == 0`.
 - FORGE updates the weight and states of a Linear layer only as of now. update of everything else happens in torch's optimizer.step()
 - no gradient accumulation yet (the update happens in every backward).

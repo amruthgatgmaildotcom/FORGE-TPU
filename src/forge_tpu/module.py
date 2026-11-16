@@ -2,6 +2,7 @@ import math, torch, warnings, torch.nn as nn
 import torch.nn.functional as F
 from forge_tpu.autograd import FusedLinearFunction
 from forge_tpu.state import FusedOptimizerState
+from forge_tpu.kernel import OPTIMIZERS
 
 #   Readme.md 
 #      when we say loss.backward() it triggers some tensors, autograd and nn.Linear ultimately. so to achieve FORGE we must make our own nn.Linear (call it FusedLinear)
@@ -34,7 +35,7 @@ from forge_tpu.state import FusedOptimizerState
 class FusedLinear(nn.Module):
     # This class will be the direct replacement of nn.Linear layer
 
-    def __init__(self, in_features, out_features, bias = False, dtype = torch.bfloat16, state_mode = "bf16", optimizer_type = "adamw", **optimizer_kwargs):
+    def __init__(self, in_features, out_features, bias = False, dtype = torch.bfloat16, state_mode = None, optimizer_type = "adamw", **optimizer_kwargs):
         if dtype not in (torch.float32, torch.bfloat16): raise ValueError(f"FusedLinear stores its weight in torch.float32 or torch.bfloat16, got {dtype}")
         super().__init__()                                                                                                           #
         self.in_features, self.out_features = in_features, out_features                                                              #
@@ -47,7 +48,7 @@ class FusedLinear(nn.Module):
         self.fusedStateObject = FusedOptimizerState(optimizer_type, state_mode, **optimizer_kwargs)                                  # this layer's optimizer (checks state_mode and the names), m and v come later
 
     @classmethod   # for now (the benchmarks use it) : wraps an existing nn.Linear, reusing its weight and bias Parameters (no copy)
-    def from_linear(cls, linear, state_mode = "bf16", optimizer_type = "adamw", **optimizer_kwargs):
+    def from_linear(cls, linear, state_mode = None, optimizer_type = "adamw", **optimizer_kwargs):
         with torch.device("meta"):                                                                                                   # don't allocate and initialize a weight that is replaced next
             fused = cls(linear.in_features, linear.out_features, linear.bias is not None, linear.weight.dtype, state_mode, optimizer_type, **optimizer_kwargs)
         fused.weight, fused.bias = linear.weight, linear.bias                                                                        # meta device to real device, no copies
@@ -61,7 +62,7 @@ class FusedLinear(nn.Module):
         # and fused_update needs to know optimizer details, and optimizer details are NOT typically found with nn.Linear, but FORGE forces our design choice to store optimizer details with FusedLinear
 
     def extra_repr(self):
-        return (f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, param_mode={'bf16' if self.weight.dtype == torch.bfloat16 else 'fp32'}, state_mode={self.fusedStateObject.state_mode}")
+        return (f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, param_mode={'bf16' if self.weight.dtype == torch.bfloat16 else 'fp32'}, state_mode={self.fusedStateObject.state_mode if OPTIMIZERS[self.fusedStateObject.optimizer_type].states else 'none'}, optimizer={self.fusedStateObject.optimizer_type}")
 
 
 

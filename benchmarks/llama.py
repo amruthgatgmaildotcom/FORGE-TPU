@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torch.nn.functional as F
 from transformers import LlamaConfig, LlamaForCausalLM
 from forge_tpu import FusedLinear
-from mlp import OPTIMIZERS, cli                                        # the shared measure + report engine (same metrics, plots and colours for every model)
+from mlp import OPTIM, OPTIMIZERS, cli, fuse, torch_optimizer                                        # the shared measure + report engine (same metrics, plots and colours for every model)
 
 # Llama-3.2-1B : the model code is LlamaForCausalLM of the transformers library, built from the numbers of the official config.json (1.24B params, tied embedding).
 # The weights are NOT downloaded (2.5 GB, and the meta-llama repo needs an access token) : random init by transformers (std 0.02, norms 1). Step time and memory do not depend on the values.
@@ -10,7 +10,8 @@ from mlp import OPTIMIZERS, cli                                        # the sha
 DEVICE, DTYPE = "tpu", torch.bfloat16
 V, D, FF, LAYERS, HEADS, KV_HEADS, THETA, EPS = 128256, 2048, 8192, 16, 32, 8, 500000.0, 1e-5
 BATCH, SEQ, BATCHES, ACTIVE, K = 1, 1024, 8, 512, 4                    # BATCH x SEQ tokens per step
-LR, WD = 1e-4, 0.01
+WD = 0.01
+LR = {"adamw": 1e-4, "sgd": 1e-2}[OPTIM]                         # OPTIM : the optimizer of this run (benchmarks/methods.py)
 HD = D // HEADS
 
 
@@ -33,18 +34,15 @@ def make_data(seed = 0):
 
 
 def make_model(name, seed = 0):
-    # FORGE fuses every Linear inside the layers. The tied embedding / head and the norms stay on a fused torch AdamW (as in the FORGE quickstart)
+    # FORGE fuses every Linear inside the layers. The tied embedding / head and the norms stay on the fused torch optimizer of the same family (AdamW or SGD)
     torch.manual_seed(seed)                                            # same init for all four optimizers
     model, params = Llama().to(DEVICE, DTYPE), None
     model.lm_head.weight = model.model.embed_tokens.weight             # tie again : .to() a TPU makes a new Parameter for each module, so the tie breaks
     if name.startswith("forge"):
-        mode = name.split("_")[1]
-        for parent in list(model.model.layers.modules()):
-            for child_name, child in parent.named_children():
-                if isinstance(child, nn.Linear): setattr(parent, child_name, FusedLinear.from_linear(child, state_mode = mode, lr = LR, weight_decay = WD))
+        fuse(model.model.layers, name, LR, WD)
         fused = {id(m.weight) for m in model.modules() if isinstance(m, FusedLinear)}
         params = [p for p in model.parameters() if id(p) not in fused]
-    return model, torch.optim.AdamW(params or model.parameters(), lr = LR, weight_decay = WD, fused = name != "adamw")
+    return model, torch_optimizer(name, params or model.parameters(), LR, WD)
 
 
 def loss_fn(out, y): return F.cross_entropy(out.logits.flatten(0, 1).float(), y.flatten())   # out : transformers' output object

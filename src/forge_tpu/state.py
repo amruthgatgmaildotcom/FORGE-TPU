@@ -40,8 +40,10 @@ class FusedOptimizerState:
     # Made in FusedLinear.__init__ (names checked right away). ensure_buffers binds the weight and allocates the buffers at the first
     # training forward, when the weight is on its final device and dtype (after any .to()).
 
-    def __init__(self, optimizer_type = "adamw", state_mode = "bf16", **hparams):
+    def __init__(self, optimizer_type = "adamw", state_mode = None, **hparams):
         if optimizer_type not in OPTIMIZERS: raise ValueError(f"unknown optimizer {optimizer_type!r}, available: {sorted(OPTIMIZERS)}")
+        if state_mode is not None and not OPTIMIZERS[optimizer_type].states: raise ValueError(f"{optimizer_type} has no optimizer state, do not give a state_mode")
+        state_mode = "bf16" if state_mode is None else state_mode                                                                   # None : bf16 (an optimizer with no state uses no state_mode)
         if state_mode not in ("bf16", "int8"): raise ValueError(f"unknown state_mode {state_mode!r}, use 'bf16' (plain) or 'int8'") #
         defaults = OPTIMIZERS[optimizer_type].defaults                                                                              # 
         if hparams.keys() - defaults.keys():                                                                                        # if there exists an unknown param
