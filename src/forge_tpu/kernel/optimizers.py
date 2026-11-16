@@ -1,10 +1,10 @@
 import jax.numpy as jnp
 
 #   Readme.md
-#     This file has one purpose, it is exclusively to maintain all classes of optimizers. when i am writing this the file has only one class, AdamW. To write another class in future ....
+#     This file has one purpose, it is exclusively to maintain all classes of optimizers. when i am writing this the file has two classes, AdamW and SGD. To write another class in future ....
 #          1.  @staticmethod def scalars(hparams, step)   |   hparams here is a {"string" : value, ...}. step is the current training step no. return a list of values only
 #          2.  @staticmethod def update(w, g, st, s)      |   here st is {"state_var": matrix} is decoded state, s is scalars (in SMEM), better understood by reading AdamW.update
-#          3.  static members : name (string), states (tuple of state names), floors ({state : smallest decoded value}, int8 states only), defaults (hyperparameters)
+#          3.  static members : name (string), states (tuple of state names, () : no state), floors ({state : smallest decoded value}, int8 states only), defaults (hyperparameters)
 #          4.  Finally there is a dictionary at the very end of this file named OPTIMIZERS, update the new class over there also
 
 
@@ -61,4 +61,28 @@ class AdamW:
 
 
 
-OPTIMIZERS = {"adamw": AdamW}
+class SGD:
+    # plain SGD (no momentum), as torch.optim.SGD(lr, weight_decay) with momentum = 0 : no optimizer state at all, so FORGE keeps only the weights
+    name, states, floors = "sgd", (), {}                                                                                              # no state : no state_mode (see state.py)
+    defaults = {'lr': 1e-3, 'weight_decay': 0.0}                                                                                      # the defaults of torch.optim.SGD
+
+    @staticmethod
+    def scalars(hp, step):
+        return [hp["lr"], hp["weight_decay"]]                                                                                         # step is not used : plain SGD has no bias correction
+
+    @staticmethod
+    def update(w, g, state_dict, scalars):
+        lr, wd = scalars[0], scalars[1]                                                                                               # w, g are fp32 tiles, state_dict is {}
+        w = w - lr * (g + wd * w)                                                                                                     # as torch : g + wd * w, then w - lr * g
+        return w, {}                                                                                                                  #
+
+
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+
+
+
+
+
+OPTIMIZERS = {"adamw": AdamW, "sgd": SGD}

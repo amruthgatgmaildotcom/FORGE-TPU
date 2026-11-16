@@ -1,13 +1,14 @@
 import gc, json, math, os, statistics, sys, time, torch, torch.nn as nn, torch.nn.functional as F
 from forge_tpu import FusedLinear
+from methods import OPTIM, OPTIMIZERS, LABELS                        # the optimizer of this run (OPTIM) and its methods
 
 # Deep residual MLP that learns a fixed random teacher. All parameters are bias-free Linear weights, so FORGE needs no second optimizer.
 # Memory at the defaults (1.09B params): AdamW = 2 (w) + 2 (grad) + 4 (m, v) = 8 B/param = 8.7 GB, + ~2.7 GB activations + 0.5 GB data.
 # This file also holds the measure + report engine that llama.py and qwen.py use (see "measure" and "report" below).
 DEVICE, DTYPE = "tpu", torch.bfloat16
 D, FF, LAYERS, BT, BATCHES = 4096, 16384, 8, 4096, 8                 # width, hidden, blocks, tokens per step, batches in the dataset
-STEPS, LR, WD = 300, 3e-4, 0.01
-OPTIMIZERS = ("adamw", "adamw_fused", "forge_bf16", "forge_int8")
+STEPS, WD = 300, 0.01
+LR = {"adamw": 3e-4, "sgd": 1e-2}[OPTIM]
 WARMUP, LOG, MAX_SECONDS = 10, 20, float(os.environ.get("MAX_SECONDS", 180))   # a run stops at STEPS or after MAX_SECONDS; the first WARMUP steps are not timed
 OUT, GiB = os.environ.get("RESULTS", "results"), 2**30
 
@@ -35,12 +36,24 @@ def make_model(name, seed = 0):
     torch.manual_seed(seed)                                            # same init for all four optimizers
     model = MLP().to(DEVICE, DTYPE)
     if name.startswith("forge"):                                       # swap every nn.Linear for a FusedLinear that shares its weight
-        mode = name.split("_")[1]
-        for parent in list(model.modules()):
-            for child_name, child in parent.named_children():
-                if isinstance(child, nn.Linear): setattr(parent, child_name, FusedLinear.from_linear(child, state_mode = mode, lr = LR, weight_decay = WD))
+        fuse(model, name, LR, WD)
         return model, None
-    return model, torch.optim.AdamW(model.parameters(), lr = LR, weight_decay = WD, fused = name == "adamw_fused")   # foreach : torch's default, as the FORGE GPU code uses
+    return model, torch_optimizer(name, model.parameters(), LR, WD)
+
+
+def fuse(module, name, lr, wd):
+    # every nn.Linear inside module -> a FusedLinear that shares its weight. forge_bf16 / forge_int8 : AdamW with that state_mode, forge_sgd : SGD (no state, no state_mode)
+    kwargs = dict(optimizer_type = "sgd") if name == "forge_sgd" else dict(optimizer_type = "adamw", state_mode = name.split("_")[1])
+    for parent in list(module.modules()):
+        for child_name, child in parent.named_children():
+            if isinstance(child, nn.Linear): setattr(parent, child_name, FusedLinear.from_linear(child, lr = lr, weight_decay = wd, **kwargs))
+
+
+def torch_optimizer(name, params, lr, wd):
+    # the torch optimizer of a method : vanilla (torch's defaults, as the FORGE GPU code), or fused. A FORGE method gets the fused one of its optimizer for the params it does not fuse
+    # fused = False is NOT passed : torch then also turns its default foreach off (adam.py, sgd.py : foreach is resolved only when fused and foreach are both None)
+    fused = {"fused": True} if name.endswith("_fused") or name.startswith("forge") else {}
+    return {"adamw": torch.optim.AdamW, "sgd": torch.optim.SGD}[OPTIM](params, lr = lr, weight_decay = wd, **fused)
 
 
 def loss_fn(out, y): return F.mse_loss(out.float(), y.float())
@@ -105,11 +118,18 @@ def measure(name, make_model, data, loss_fn, flops, steps = STEPS):
 
 #------------------------------------------------------------------------- report --------------------------------------------------------------------------#
 
-LABELS = {"adamw": "vanilla AdamW", "adamw_fused": "fused AdamW", "forge_bf16": "FORGE (bf16)", "forge_int8": "FORGE (int8)"}
-COLORS = {"adamw": "#2f7ed8", "adamw_fused": "#8c8c8c", "forge_bf16": "#14896b", "forge_int8": "#14896b"}           # headline figure
-LINES = {"adamw": ("#2f7ed8", "--"), "adamw_fused": ("#8c8c8c", ":"), "forge_bf16": ("#14896b", "-"), "forge_int8": ("#e5484d", "-")}   # line plots
+REF = OPTIMIZERS[0]                                                    # vanilla torch : the reference of the loss table and of the headline arrows
+COLORS = {"adamw": "#2f7ed8", "adamw_fused": "#8c8c8c", "forge_bf16": "#14896b", "forge_int8": "#14896b",           # headline figure
+          "sgd": "#2f7ed8", "sgd_fused": "#8c8c8c", "forge_sgd": "#14896b"}
+LINES = {"adamw": ("#2f7ed8", "--"), "adamw_fused": ("#8c8c8c", ":"), "forge_bf16": ("#14896b", "-"), "forge_int8": ("#e5484d", "-"),   # line plots
+         "sgd": ("#2f7ed8", "--"), "sgd_fused": ("#8c8c8c", ":"), "forge_sgd": ("#14896b", "-")}
 PARTS = {"weights": ("weights", "#2f7ed8"), "states": ("opt states", "#1db07a"), "activations": ("activations", "#c9ced8"), "grads": ("weight gradient", "#e5484d")}
 RED = "#c62828"
+
+
+def na_note(fig, missing):
+    # a method whose run failed (no result file) is not drawn : say so under the figure
+    if missing: fig.text(0.01, 0.005, "NA (the run failed, not drawn) : " + ", ".join(LABELS[n] for n in missing), color = RED, fontsize = 11, ha = "left", va = "bottom")
 
 
 def at_point(r, label, grads):
@@ -120,7 +140,7 @@ def at_point(r, label, grads):
     return held, {**parts, "activations": max(held - sum(parts.values()), 0.0)}
 
 
-def headline(R, path):
+def headline(R, path, missing = ()):
     import matplotlib.pyplot as plt
     names = list(R)
     fig, (a1, a2, b) = plt.subplots(1, 3, figsize = (21, 5.6), gridspec_kw = {"width_ratios": [1, 1, 1]})
@@ -148,9 +168,9 @@ def headline(R, path):
         b.scatter(R[n]["peak"], R[n]["step_ms"], s = 260 if big else 70, color = COLORS[n], zorder = 3)
         b.annotate(LABELS[n], (R[n]["peak"], R[n]["step_ms"]), xytext = (14, 0) if big else (-10, 12), textcoords = "offset points", va = "center",
                    ha = "left" if big else "right", fontsize = 13 if big else 12, fontweight = "bold" if big else "normal", color = "black" if big else COLORS[n])
-    if "adamw" in R:
+    if REF in R:
         for n in (n for n in names if n.startswith("forge")):
-            p, q = (R["adamw"]["peak"], R["adamw"]["step_ms"]), (R[n]["peak"], R[n]["step_ms"])
+            p, q = (R[REF]["peak"], R[REF]["step_ms"]), (R[n]["peak"], R[n]["step_ms"])
             b.annotate("", q, p, arrowprops = dict(arrowstyle = "-|>", color = RED, ls = "--", lw = 2, shrinkA = 8, shrinkB = 12))
             r = p[1] / q[1]
             b.text((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, f"{r:.2f}× faster" if r >= 1 else f"{1 / r:.2f}× slower", color = RED, fontsize = 13, fontweight = "bold", ha = "center", va = "bottom")
@@ -160,19 +180,19 @@ def headline(R, path):
     b.set_xlabel("Peak memory (GiB)  ←  smaller", fontsize = 13); b.set_ylabel("Step time (ms)  ↑  faster", fontsize = 13)
     b.set_title("(c) Memory vs. speed", fontsize = 17, fontweight = "bold"); b.grid(ls = ":")
     for ax in (a1, a2, b): ax.spines[["top", "right"]].set_visible(False); ax.tick_params(labelsize = 12)
-    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+    fig.tight_layout(rect = (0, 0.04 if missing else 0, 1, 1)); na_note(fig, missing); fig.savefig(path, dpi = 200); plt.close(fig)
 
 
-def curves(R, key, ylabel, title, path):
+def curves(R, key, ylabel, title, path, missing = ()):
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize = (10, 5.5))
     for n, r in R.items(): ax.plot(range(r["steps"]), r[key], color = LINES[n][0], ls = LINES[n][1], lw = 2, label = LABELS[n])
     ax.set_xlabel("Training step", fontsize = 13); ax.set_ylabel(ylabel, fontsize = 13); ax.set_title(title, fontsize = 16, fontweight = "bold")
     ax.grid(ls = ":"); ax.legend(fontsize = 12); ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+    fig.tight_layout(rect = (0, 0.05 if missing else 0, 1, 1)); na_note(fig, missing); fig.savefig(path, dpi = 200); plt.close(fig)
 
 
-def memory(R, title, path):
+def memory(R, title, path, missing = ()):
     # (c) the peak of every step (solid) and what it holds after it (dotted)   |   (d) one step, layer by layer, with the peak of the timed steps (thin lines)
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -202,29 +222,32 @@ def memory(R, title, path):
     c.set_title("(c) Memory at every step", fontsize = 16, fontweight = "bold", loc = "left"); d.set_title("(d) Inside one step, layer by layer", fontsize = 16, fontweight = "bold", loc = "left")
     for ax in (c, d): ax.set_ylabel("Memory (GiB)", fontsize = 13); ax.grid(ls = ":"); ax.spines[["top", "right"]].set_visible(False)
     fig.suptitle(title, x = 0.01, ha = "left", color = "#666", fontsize = 11)
-    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+    fig.tight_layout(rect = (0, 0.04 if missing else 0, 1, 1)); na_note(fig, missing); fig.savefig(path, dpi = 200); plt.close(fig)
 
 
-def table(R, desc):
+def table(R, desc, missing = ()):
     p = next(iter(R.values()))
     rows = [f"{desc}. Step time is the median of {p['steps'] - WARMUP} steps (± std), after {WARMUP} warmup steps.", "",
             "| Method | Peak (GiB) | Step (ms) | TF/s |", "|---|:--:|:--:|:--:|"]
-    rows += [f"| {LABELS[n]} | {r['peak']:.2f} | {r['step_ms']:.1f} ± {r['step_std']:.1f} | {r['tflops']:.0f} ± {r['tflops_std']:.0f} |" for n, r in R.items()]
-    if "adamw" in R:
+    order = [n for n in OPTIMIZERS if n in R or n in missing]           # every method in its place, NA where the run failed (e.g. fused SGD not supported on this TPU)
+    rows += [f"| {LABELS[n]} | NA | NA | NA |" if n in missing else f"| {LABELS[n]} | {R[n]['peak']:.2f} | {R[n]['step_ms']:.1f} ± {R[n]['step_std']:.1f} | {R[n]['tflops']:.0f} ± {R[n]['tflops_std']:.0f} |" for n in order]
+    if REF in R:
         # each run stops at STEPS or MAX_SECONDS, so the runs have different lengths : compare all of them at the last step that every run has
-        ref, last = R["adamw"]["losses"], min(r["steps"] for r in R.values())
-        rows += ["", f"| Method | Loss at step {last} (last common step) | max \\|loss − vanilla AdamW\\| (steps 1 to {last}) |", "|---|:--:|:--:|"]
-        rows += [f"| {LABELS[n]} | {r['losses'][last - 1]:.4f} | {max(abs(a - b) for a, b in zip(r['losses'][:last], ref[:last])):.4f} |" for n, r in R.items()]
+        ref, last = R[REF]["losses"], min(r["steps"] for r in R.values())
+        rows += ["", f"| Method | Loss at step {last} (last common step) | max \\|loss − {LABELS[REF]}\\| (steps 1 to {last}) |", "|---|:--:|:--:|"]
+        rows += [f"| {LABELS[n]} | NA | NA |" if n in missing else f"| {LABELS[n]} | {R[n]['losses'][last - 1]:.4f} | {max(abs(a - b) for a, b in zip(R[n]['losses'][:last], ref[:last])):.4f} |" for n in order]
     return "\n".join(rows)
 
 
 def report(prefix, desc, loss_label):
     R = {n: json.load(open(f"{OUT}/{prefix}_{n}.json")) for n in OPTIMIZERS if os.path.exists(f"{OUT}/{prefix}_{n}.json")}
-    desc = desc.format(params = f"{next(iter(R.values()))['params'] / 1e9:.2f}") + ", bf16 weights, single TPU"
-    headline(R, f"{OUT}/{prefix}_headline.png")
-    curves(R, "losses", loss_label, f"{prefix} : loss vs. training step", f"{OUT}/{prefix}_loss.png")
-    memory(R, desc, f"{OUT}/{prefix}_memory.png")
-    md = table(R, desc); open(f"{OUT}/{prefix}_table.md", "w").write(md + "\n"); print(md)
+    missing = [n for n in OPTIMIZERS if n not in R]                    # runs that failed : NA in the tables, a note on the plots
+    if not R: raise SystemExit(f"{prefix} ({OPTIM}) : no run finished, nothing to report")
+    desc = desc.format(params = f"{next(iter(R.values()))['params'] / 1e9:.2f}") + f", {OPTIM}, bf16 weights, single TPU"
+    headline(R, f"{OUT}/{prefix}_headline.png", missing)
+    curves(R, "losses", loss_label, f"{prefix} ({OPTIM}) : loss vs. training step", f"{OUT}/{prefix}_loss.png", missing)
+    memory(R, desc, f"{OUT}/{prefix}_memory.png", missing)
+    md = table(R, desc, missing); open(f"{OUT}/{prefix}_table.md", "w").write(md + "\n"); print(md)
 
 
 def cli(prefix, make_model, make_data, loss_fn, flops, desc, loss_label):
