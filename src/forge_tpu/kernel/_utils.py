@@ -3,7 +3,7 @@ from jax.experimental.pallas import tpu as pltpu
 from .codecs import CODECS
 from .optimizers import OPTIMIZERS
 
-DEFAULT_TILES = (512, 1024, 1024)     # (bv, bh, bbt)
+DEFAULT_TILES = (512, 2048, 2048)     # (bv, bh, bbt) : the best single triple of benchmarks/tiler.py for AdamW and SGD on the three models
 #   Readme.md
 #      This file is internal to the kernel folder (starts with _), used by fused_grad.py (and lookup by __init__.py)
 #      each defined function is readable and self explainatory, so im skipping explaination here

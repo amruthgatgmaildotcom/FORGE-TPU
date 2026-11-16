@@ -56,10 +56,10 @@ for each model there are three plots :
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
-| vanilla AdamW | 12.69 | 259.6 ± 0.0 | 103 |
+| vanilla AdamW | 13.91 | 259.5 ± 0.1 | 103 |
 | fused AdamW | 12.69 | 216.7 ± 0.1 | 124 |
-| FORGE (bf16) | 10.66 | 195.5 ± 0.1 | 137 |
-| FORGE (int8) | 8.76 | 195.5 ± 0.1 | 137 |
+| FORGE (bf16) | 10.67 | 187.9 ± 0.1 | 143 |
+| FORGE (int8) | 8.76 | 188.9 ± 0.1 | 142 |
 
 ![MLP headline](results/adamw/mlp/mlp_headline.png)
 ![MLP loss](results/adamw/mlp/mlp_loss.png)
@@ -69,10 +69,10 @@ for each model there are three plots :
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
-| vanilla AdamW | 11.75 | 237.0 ± 18.2 | 34 |
-| fused AdamW | 11.37 | 173.1 ± 16.7 | 46 |
-| FORGE (bf16) | 11.31 | 170.6 ± 10.1 | 47 |
-| FORGE (int8) | 9.56 | 179.7 ± 8.4 | 45 |
+| vanilla AdamW | 12.04 | 221.9 ± 12.3 | 36 |
+| fused AdamW | 11.37 | 176.0 ± 9.3 | 45 |
+| FORGE (bf16) | 11.31 | 169.3 ± 20.4 | 47 |
+| FORGE (int8) | 9.57 | 160.5 ± 18.3 | 50 |
 
 ![Llama headline](results/adamw/llama/llama_headline.png)
 ![Llama loss](results/adamw/llama/llama_loss.png)
@@ -82,10 +82,10 @@ for each model there are three plots :
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
-| vanilla AdamW | 8.09 | 520.5 ± 50.5 | 8 |
-| fused AdamW | 8.11 | 353.7 ± 56.1 | 12 |
-| FORGE (bf16) | 8.10 | 381.4 ± 56.2 | 11 |
-| FORGE (int8) | 7.33 | 431.7 ± 33.7 | 10 |
+| vanilla AdamW | 8.14 | 393.3 ± 43.2 | 11 |
+| fused AdamW | 8.11 | 357.4 ± 17.0 | 12 |
+| FORGE (bf16) | 8.10 | 305.0 ± 43.6 | 14 |
+| FORGE (int8) | 7.33 | 362.7 ± 28.3 | 12 |
 
 ![Qwen headline](results/adamw/qwen/qwen_headline.png)
 ![Qwen loss](results/adamw/qwen/qwen_loss.png)
@@ -113,9 +113,9 @@ TF/s = model FLOPs of one step (6 x params x tokens, + attention) / step time. t
 
 ## Tiles
 
-the kernel uses one tile size `(bv, bh, bbt)` for every layer (`DEFAULT_TILES` in `src/forge_tpu/kernel/_utils.py`, right now `(512, 1024, 1024)`).
+the kernel uses one tile size `(bv, bh, bbt)` for every layer (`DEFAULT_TILES` in `src/forge_tpu/kernel/_utils.py`, right now `(512, 2048, 2048)`).
 `benchmarks/colab_cell_tiler.py` times many tile sizes on every fused layer shape of the three models and reports the fastest. it changes nothing. (fully AI generated code)
-(1024, 1024, 1024) performed best.
+(512, 2048, 2048) performed best as one triple for all three models, for AdamW and SGD (against the old default (512, 1024, 1024) : MLP 0.88 / 0.95, Llama 0.89 / 0.88, Qwen 1.04 / 1.05 of the time). the results above ran with it.
 
 ## Profile
 
