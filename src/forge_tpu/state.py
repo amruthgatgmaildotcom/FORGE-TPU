@@ -48,12 +48,22 @@ class FusedOptimizerState:
             raise TypeError(f"unknown {optimizer_type} hyperparameters {sorted(hparams.keys() - defaults.keys())}, expected some of {sorted(defaults)}")
         self.optimizer_type, self.state_mode = optimizer_type, state_mode                                                           # 
         self.hparams = {**defaults, **hparams}                                                                                      # merging dictionaries, values of hparams over writes defaults if keys clash
-        self.step, self.weight, self.buffers = 0, None, None                                                                        # weight and buffers : see ensure_buffers
+        self.step, self.weight, self.buffers, self.device, self.shape = 0, None, None, None, None                                   # weight, buffers, device and shape : see ensure_buffers
 
     def ensure_buffers(self, weight):
         # binds the weight and allocates the space on HBM for the optimizer states (once), self.buffers become {str : {str : tensor, }, }
+        # Called at every training forward : the module can get a NEW Parameter after the first one (.to() a TPU, load_state_dict(assign = True), ...).
+        # Then the update must go to the new Parameter, else the module's weight never changes (the old one is updated, silently). The states are kept
+        # (moved to the new weight's device if it changed), the shape must be the same
+        # .to() can also keep the SAME Parameter and only change its data (param.data = ..., torch does this when the old and new tensor types are compatible) :
+        # then the object is the same but the device can be new, so the device of the states is checked too (self.device : where the states are)
         if self.buffers is None:
             self.weight, self.buffers = weight, _bridge.allocate_state(weight, self.optimizer_type, self.state_mode)
+            self.device, self.shape = weight.device, weight.shape
+        elif weight is not self.weight or weight.device != self.device:
+            if weight.shape != self.shape: raise RuntimeError(f"FusedLinear got a new weight of shape {tuple(weight.shape)}, its optimizer states are for {tuple(self.shape)}")
+            if weight.device != self.device: self.buffers, self.device = _map(self.buffers, lambda tensoR: tensoR.to(weight.device)), weight.device
+            self.weight = weight
 
     def increment_step(self):                                                                                                       #
         # we also maintain how many times this layer has been updated (AdamW needs it for the bias correction, see optimizers.py)
@@ -68,7 +78,7 @@ class FusedOptimizerState:
         if (d["optimizer_type"], d["state_mode"]) != (self.optimizer_type, self.state_mode): raise ValueError(f"state is for ({d['optimizer_type']}, {d['state_mode']}), this layer uses ({self.optimizer_type}, {self.state_mode})")
         self.step = d["step"]
         # Through the host (as in state_dict) : the layer must never share a buffer with the caller's tensors, the update gives its buffers away (donation, see _bridge._rebind)
-        self.buffers = _map(d["buffers"], lambda tensoR: tensoR.to("cpu", copy = True).to(self.weight.device))
+        self.buffers, self.device = _map(d["buffers"], lambda tensoR: tensoR.to("cpu", copy = True).to(self.weight.device)), self.weight.device
 
     def __getattr__(self, name):
         # Read-only views of the state arrays, for any optimizer (None when absent): for adamw state.m, state.v (plain), state.m_q, state.m_scale, ... (int8). Python calls this only for names that are not normal attributes.

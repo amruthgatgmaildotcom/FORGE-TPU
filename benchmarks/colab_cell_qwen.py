@@ -33,11 +33,17 @@ assert run("-c", CHECK) == 0, "STOP : no working TPU (see the message above)"
 HAVE = "try: from transformers import LlamaForCausalLM, Qwen3ForCausalLM\nexcept Exception: raise SystemExit(1)"
 if run("-c", HAVE) != 0: assert run("-m", "pip", "install", "-q", "-U", "transformers") == 0 and run("-c", HAVE) == 0, "STOP : transformers cannot be installed / imported (see the message above)"
 
-# 2. the repo zip (benchmarks/, src/, README.md at its top level) -> /content/TRAVELLER
+# 2. the repo zip -> /content/TRAVELLER. Both forms work : benchmarks/, src/, README.md at the top of the zip, or inside one top folder
 REPO = "/content/TRAVELLER"
 shutil.rmtree(REPO, ignore_errors = True)
 zipfile.ZipFile(os.path.abspath(next(iter(files.upload())))).extractall(REPO)
-assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/qwen.py"), f"STOP : the zip must hold src/ and benchmarks/ at its top level, it holds {os.listdir(REPO)}"
+inner = [name for name in os.listdir(REPO) if name != "__MACOSX" and not name.startswith(".")]   # __MACOSX : a folder that the macOS zip tool adds
+if not os.path.exists(f"{REPO}/src") and len(inner) == 1 and os.path.isdir(f"{REPO}/{inner[0]}"):   # a zip with one top folder (GitHub : Code > Download ZIP) : move its content up
+    top = f"{REPO}/{inner[0]}"
+    for name in os.listdir(top): shutil.move(f"{top}/{name}", f"{REPO}/{name}")
+    os.rmdir(top)
+shutil.rmtree(f"{REPO}/results", ignore_errors = True)                # results/ of the repo are old runs : a report must never show them in place of a run that failed
+assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/qwen.py"), f"STOP : the zip must hold src/ and benchmarks/ (at its top level or in one top folder), it holds {os.listdir(REPO)}"
 OUT = f"{REPO}/results/qwen"
 ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT}
 
