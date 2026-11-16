@@ -145,4 +145,3 @@ results/                      the latest results zip, unpacked
 - only AdamW as of now. states are bf16 or int8 (thats all v5e supports natively). int8 states need `out_features % 64 == 0`.
 - FORGE updates the weight and states of a Linear layer only as of now. update of everything else happens in torch's optimizer.step()
 - no gradient accumulation yet (the update happens in every backward).
-- do not move or convert the model (`.to()`) after the first training forward : the optimizer state stays with the old weight.
