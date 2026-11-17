@@ -3,6 +3,8 @@ import os, re, shutil, subprocess, sys, warnings, zipfile
 from google.colab import files
 warnings.filterwarnings("ignore")
 
+OPTIMS = {"adamw", "SGD"}                                              # the optimizers to run (any case) : each one goes to results/<optim>/... Remove one to skip it
+
 QUIET = {"PYTHONWARNINGS": "ignore", "TF_CPP_MIN_LOG_LEVEL": "3", "TPU_STDERR_LOG_LEVEL": "3", "TPU_MIN_LOG_LEVEL": "3", "GLOG_minloglevel": "3", "GRPC_VERBOSITY": "ERROR"}
 NOISE = re.compile(r"^[IW]\d{4} |^WARNING: All log messages|^Successfully renamed PrivateUse1|^Registered Python module|^Device type:|^Initializing TPU|^num_cache|^num_compilations|^peak_compilation|Warning: ")
 
@@ -32,18 +34,34 @@ assert run("-c", CHECK) == 0, "STOP : no working TPU (see the message above)"
 HAVE = "try: from transformers import LlamaForCausalLM, Qwen3ForCausalLM\nexcept Exception: raise SystemExit(1)"
 if run("-c", HAVE) != 0: assert run("-m", "pip", "install", "-q", "-U", "transformers") == 0 and run("-c", HAVE) == 0, "STOP : transformers cannot be installed / imported (see the message above)"
 
-# 2. the repo zip (benchmarks/, src/, README.md at its top level) -> /content/TRAVELLER
+# 2. the repo zip -> /content/TRAVELLER. Both forms work : benchmarks/, src/, README.md at the top of the zip, or inside one top folder
 REPO = "/content/TRAVELLER"
 shutil.rmtree(REPO, ignore_errors = True)
 zipfile.ZipFile(os.path.abspath(next(iter(files.upload())))).extractall(REPO)
-assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/tests.py"), f"STOP : the zip must hold src/ and benchmarks/ at its top level, it holds {os.listdir(REPO)}"
-OUT = f"{REPO}/results/tests"
-ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT}
+inner = [name for name in os.listdir(REPO) if name != "__MACOSX" and not name.startswith(".")]   # __MACOSX : a folder that the macOS zip tool adds
+if not os.path.exists(f"{REPO}/src") and len(inner) == 1 and os.path.isdir(f"{REPO}/{inner[0]}"):   # a zip with one top folder (GitHub : Code > Download ZIP) : move its content up
+    top = f"{REPO}/{inner[0]}"
+    for name in os.listdir(top): shutil.move(f"{top}/{name}", f"{REPO}/{name}")
+    os.rmdir(top)
+shutil.rmtree(f"{REPO}/results", ignore_errors = True)                # results/ of the repo are old runs : a report must never show them in place of a run that failed
+assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/tests.py"), f"STOP : the zip must hold src/ and benchmarks/ (at its top level or in one top folder), it holds {os.listdir(REPO)}"
 
-# 3. run every check (output : PASS / FAIL per case, a model table, the list of failures)
-code = run("benchmarks/tests.py", cwd = REPO, env = ENV)
-assert code == 0 and os.path.exists(f"{OUT}/tests_report.md"), "STOP : tests.py crashed (see the error above)"
-print("\nALL CHECKS PASS" if "FAIL" not in open(f"{OUT}/tests_report.md").read() else "\nSOME CHECKS FAIL : see the list above and tests_report.md")
+# 2a. the optimizers to run (OPTIMS, top of the cell) and their methods (benchmarks/methods.py : plain Python, no TPU)
+import runpy
+METHODS = runpy.run_path(f"{REPO}/benchmarks/methods.py")["METHODS"]
+RUN = sorted({o.lower() for o in OPTIMS})
+assert RUN and set(RUN) <= set(METHODS), f"STOP : OPTIMS = {OPTIMS}, the known optimizers are {sorted(METHODS)}"
 
-# 4. download the report (to select the folder : turn on 'Ask where to save each file' in your browser settings)
-files.download(shutil.make_archive("/content/forge_tests_results", "zip", OUT))
+# 3. each optimizer : run every check (output : PASS / FAIL per case, a model table, the list of failures), into results/<optim>/tests
+crashed = []
+for optim in RUN:
+    print(f"\n========== correctness tests : {optim} ==========")
+    OUT = f"{REPO}/results/{optim}/tests"
+    code = run("benchmarks/tests.py", cwd = REPO, env = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT, "OPTIM": optim})
+    if code != 0 or not os.path.exists(f"{OUT}/tests_report.md"): crashed.append(optim); print(f"{optim} : tests.py crashed (see the error above)"); continue
+    print(f"\n{optim} : ALL CHECKS PASS" if "FAIL" not in open(f"{OUT}/tests_report.md").read() else f"\n{optim} : SOME CHECKS FAIL : see the list above and results/{optim}/tests/tests_report.md")
+
+# 4. download the reports, folders <optim>/tests/ (to select the folder : turn on 'Ask where to save each file' in your browser settings)
+os.makedirs(f"{REPO}/results", exist_ok = True)
+files.download(shutil.make_archive("/content/forge_tests_results", "zip", f"{REPO}/results"))
+assert not crashed, f"STOP : tests.py crashed for {crashed} (see the errors above)"

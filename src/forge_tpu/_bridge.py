@@ -4,8 +4,7 @@ from forge_tpu import kernel
 
 _TORCH = {"bfloat16": torch.bfloat16, "float32": torch.float32, "int8": torch.int8}
 _JAX = {torch_type: type_string for type_string, torch_type in _TORCH.items()}
-KICK_EVERY = 1                                                                                                                        # eager TPU : start the deferred work every KICK_EVERY updates, 0 : never (see _kick)
-_LAUNCHES, _IN_PLACE, _NO_REPLAY, _KICKS = {}, set(), set(), [0]
+_LAUNCHES, _IN_PLACE, _NO_REPLAY = {}, set(), set()
 
 #   Readme.md
 #     we need a mediator between torch --- jax/pallas. This file contains fused_update function which recieves tensors and it internally calls the jax kernel via jax_op
@@ -44,7 +43,7 @@ def fused_update(go2d, x2d, fusedStateObject, with_dx):
     flat = _flatten(fusedStateObject.buffers, fusedStateObject.optimizer_type)                                                        # 
     # torch.compile DOES NOT WORK YET, this block is kept for later. it needs two things back (both removed, nothing used them) : a jax_op without donate_argnums (it was _COMPILED_OPS) and
     # fusedStateObject.step_tensor (the step count as a device tensor, incremented with add_ inside the compiled program)
-    # if torch.compiler.is_compiling():                                                                                                 # inside torch.compile : the whole step becomes one XLA program
+    # if torch.compiler.is_compiling():        # inside torch.compile : the whole step becomes one XLA program
     #     # step is a device tensor here (a Python int would be frozen at trace time), so the scalars are computed on device, and the new
     #     # w and states are written back with copy_ (set_ cannot be traced). XLA sees kernel + copy_ in one program and writes in place
     #     scalars = kernel.OPTIMIZERS[fusedStateObject.optimizer_type].scalars(fusedStateObject.hparams, fusedStateObject.step_tensor)
@@ -58,8 +57,8 @@ def fused_update(go2d, x2d, fusedStateObject, with_dx):
         inputs = [s, go2d, x2d, w, *flat]                                                                                             # the kernel's tensors, in torch_tpu's launch order (no detach : the backward runs without grad mode)
         call = lambda: _run_jax_op(fusedStateObject.optimizer_type, fusedStateObject.state_mode)(s, [go2d.detach(), x2d.detach()], w.detach(), flat)
         launch = _LAUNCHES.get(key)                                                                                                   # 
-        out = _replay(launch, inputs, key, call) if launch else _launch(call, inputs, [w, *flat], key)                                # 
-        _rebind(fusedStateObject, out); _kick(out[0])                                                                                 # w's new value
+        out = _replay(launch, inputs, key, call) if launch else _launch(call, inputs, [w, *flat], key)                                # _replay if already _launched, skip formalities 
+        _rebind(fusedStateObject, out)                                                                                                # w's new value and states (the update runs on the TPU during the backward)
         return dx                                                                                                                     #
     elif w.device.type == "cpu": out = [_to_torch(a) for a in _run(jnp.asarray(scalars, jnp.float32), [_to_jax(go2d), _to_jax(x2d)], _to_jax(w), [_to_jax(t) for t in flat], optimizer = fusedStateObject.optimizer_type, state_mode = fusedStateObject.state_mode, interpret = True)]
     else: raise RuntimeError(f"FusedLinear supports devices 'tpu' and 'cpu', got '{w.device}'")                                       # 
@@ -93,7 +92,7 @@ def _rebind(fusedStateObject, out):
         arrays = fusedStateObject.buffers[state_string]                                                                               #
         for stringg in arrays: arrays[stringg] = next(new)                                                                            #
     # when we donate_argnums in jax_op, it unfortunately marks those tensors as deleted (those TPU pointers cannot be used) and fusedObject.members point no where now although the updates happen in place.
-    # that is why we need to set_ these tensor objects. the problem with this is the set_ is not tracable, so we cannot use torch.compile as of now
+    # that is why we need to set_ these tensor objects. the problem with this is the set_ is not tracable, so we cannot use torch.compile as of now, and dlpack only works on CPU and NVIDIA
 
 
 
@@ -112,7 +111,7 @@ def _run(scalars: jax.Array, inputs: list[jax.Array], w: jax.Array, states: list
 def _run_jax_op(optimizer, state_mode, tiles = ""):
     # wrap _run (a pure jax, takees in and out jax.Array) with torch.tpu.pallas.jax_op, now _run_jax_op is basically _run but for torch tensors instead of jax arrays
     # donate_argnums = (2, 3) : w and states are given away, so XLA can write the new w and states into the same HBM (see _rebind). one op per (optimizer, state_mode, tiles), its name must be unique
-    name = f"pallas::forge_fused_grad_{optimizer}_{state_mode}" + ("_" + tiles if tiles else "")
+    name = f"pallas::forge_fused_grad_{optimizer}_{state_mode}" + ("_" + tiles if tiles else "")                                      # more details under _rebind definiton 
     return torch.tpu.pallas.jax_op(name, functools.partial(_run, optimizer = optimizer, state_mode = state_mode, interpret = False, tiles = tiles), donate_argnums = (2, 3))
 
 @functools.lru_cache(maxsize = 8)
@@ -162,11 +161,6 @@ def _replay(launch, inputs, key, call):
         warnings.warn(f"FORGE: replaying torch_tpu's kernel launch failed ({error}); {key} goes through jax_op from now on (slower)") #
         return call()                                                                                                                 #
 
-def _kick(weight):
-    _KICKS[0] += 1                                                                                                                    # counts every fused update of every layer
-    if KICK_EVERY and _KICKS[0] % KICK_EVERY == 0:                                                                                    # every KICK_EVERY-th update (KICK_EVERY = 0 : never) ...
-        from torch_tpu._internal import sync                                                                                          # ... ask torch_tpu to start the work it has queued for this weight now
-        sync.synchronize([weight], False)                                                                                             # wait = False : materialize, do not block
 
 
 
@@ -184,26 +178,6 @@ def _kick(weight):
 #     The 5th one is our real kernel and takes very less time (about 21us for one llama-1B layer) while 3rd and 4th are just pytorch checks and is skippable.
 #     (3rd + 4th layer took about 160us per llama-1B layer). _launch does the exact same thing torch would do and _replay skips 3rd and 4th and directly does 5th. 
 #
-#   TORCH_TPU_DEFER_AND_FUSE, STRICT EAGER, COMPILATION EXECUTUION FOR TPUs :
-#     each tpu operation is compiled and cached, and we call an operation and wait until it returns, this is strict eager mode (default). This adds TPU launch 
-#     overhead and its a lot. TORCH_TPU_DEFER_AND_FUSE = 1 would pile up the operations in a graph and execute them in groups (until one of them is needed to
-#     return for someother part of the code). This mode has reduced no of TPU launches.
-#     In both modes Python does not wait for the TPU : it issues an op and goes on, the TPU runs the ops in order. What differs is WHEN an op is
-#     sent to the TPU. Strict eager (EagerMode.DEFER_NEVER, the default, benchmarks/investigate.py printed it) : at once. DEFER_AND_FUSE : only
-#     when something needs its result (.item(), .cpu(), a print, a synchronize of that tensor, ...).
-#
-#   WHY _kick IS NEEDED (DEFER_AND_FUSE only) :
-#     nothing reads FORGE's new w and states during the backward. Autograd does not (backward returns None for dw), the optimizer step does not
-#     (the fused weights are not in it). The first reader is the NEXT forward. So without a kick, every fused update of a step (112 for Llama-1B,
-#     196 for Qwen3-0.6B) stays queued until the next step, and this costs twice :
-#       1. memory : a queued update keeps its inputs alive, go and x (the activation saved for this layer). Autograd drops them, but the queue
-#          does not, so they stay in HBM until the update runs. Then the activations are NOT freed during the backward, they are all freed only
-#          at the next forward, and the peak becomes weights + states + all activations + all go : FORGE loses the memory it was made to save.
-#       2. time : the TPU runs the 112 / 196 updates one after another at the start of the next step, while it could have run each of them
-#          during this backward, at the time when the TPU waits for Python anyway (Llama and Qwen leave the TPU idle a lot, see the xprof traces).
-#     _kick asks torch_tpu to send the queued work of the new w to the TPU now (synchronize(..., False) : materialize, do NOT wait), so Python goes
-#     on with the backward and the TPU runs the update right away, then go and x are freed. KICK_EVERY > 1 kicks only every KICK_EVERY updates :
-#     a kick also cuts the deferred graph there, so fewer kicks leave bigger graphs for XLA to fuse, but keep more go and x alive.
-#     In strict eager (DEFER_NEVER, the default) every op is already sent at once, so a kick has nothing to start : the step time and the peak were
-#     the same with KICK_EVERY = 0 (benchmarks/investigate.py). A kick costs about 13 us. Skipping it in DEFER_NEVER (a check of the eager mode before
-#     each kick) gave no measurable gain on the TPU (the check costs about as much as the kick), so _kick stays as it is : simple, and right in both modes.
+#   EAGER MODE :
+#     FORGE sets no eager mode, so torch_tpu's default is used (EagerMode.DEFER_NEVER) : every op, the fused update too, is sent to the TPU at once,
+#     so each layer's update runs during the backward. Python does not wait for the TPU : it issues an op and goes on, the TPU runs the ops in order.

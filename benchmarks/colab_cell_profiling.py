@@ -1,9 +1,11 @@
-# FORGE TPU : profile of MLP + Llama 1B + Qwen3 0.6B (where the time of one step goes), one Colab cell (TPU v5e-1 / v6e-1). ~12 min.
-# Each model and method in its own process (benchmarks/profiling.py). Results : profile.zip with mlp/, llama/, qwen/ (profile_* files only)
+# FORGE TPU : profile of MLP + Llama 1B + Qwen3 0.6B (where the time of one step goes), one Colab cell (TPU v5e-1 / v6e-1). ~12 min per optimizer.
+# Each model and method in its own process (benchmarks/profiling.py). Results : profile.zip with <optim>/mlp/, <optim>/llama/, <optim>/qwen/ (profile_* files only)
 import os, re, shutil, subprocess, sys, warnings, zipfile
 from IPython.display import Image, Markdown, display
 from google.colab import files
 warnings.filterwarnings("ignore")
+
+OPTIMS = {"adamw", "SGD"}                                              # the optimizers to run (any case) : each one goes to results/<optim>/... Remove one to skip it
 
 QUIET = {"PYTHONWARNINGS": "ignore", "TF_CPP_MIN_LOG_LEVEL": "3", "TPU_STDERR_LOG_LEVEL": "3", "TPU_MIN_LOG_LEVEL": "3", "GLOG_minloglevel": "3", "GRPC_VERBOSITY": "ERROR"}
 NOISE = re.compile(r"^[IW]\d{4} |^WARNING: All log messages|^Successfully renamed PrivateUse1|^Registered Python module|^Device type:|^Initializing TPU|^num_cache|^num_compilations|^peak_compilation|Warning: ")
@@ -34,22 +36,36 @@ assert run("-c", CHECK) == 0, "STOP : no working TPU (see the message above)"
 HAVE = "try: from transformers import LlamaForCausalLM, Qwen3ForCausalLM\nexcept Exception: raise SystemExit(1)"
 if run("-c", HAVE) != 0: assert run("-m", "pip", "install", "-q", "-U", "transformers") == 0 and run("-c", HAVE) == 0, "STOP : transformers cannot be installed / imported (see the message above)"
 
-# 2. the repo zip (benchmarks/, src/, README.md at its top level) -> /content/TRAVELLER
+# 2. the repo zip -> /content/TRAVELLER. Both forms work : benchmarks/, src/, README.md at the top of the zip, or inside one top folder
 REPO = "/content/TRAVELLER"
 shutil.rmtree(REPO, ignore_errors = True)
 zipfile.ZipFile(os.path.abspath(next(iter(files.upload())))).extractall(REPO)
-assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/profiling.py"), f"STOP : the zip must hold src/ and benchmarks/ at its top level, it holds {os.listdir(REPO)}"
+inner = [name for name in os.listdir(REPO) if name != "__MACOSX" and not name.startswith(".")]   # __MACOSX : a folder that the macOS zip tool adds
+if not os.path.exists(f"{REPO}/src") and len(inner) == 1 and os.path.isdir(f"{REPO}/{inner[0]}"):   # a zip with one top folder (GitHub : Code > Download ZIP) : move its content up
+    top = f"{REPO}/{inner[0]}"
+    for name in os.listdir(top): shutil.move(f"{top}/{name}", f"{REPO}/{name}")
+    os.rmdir(top)
+shutil.rmtree(f"{REPO}/results", ignore_errors = True)                # results/ of the repo are old runs : a report must never show them in place of a run that failed
+assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/profiling.py"), f"STOP : the zip must hold src/ and benchmarks/ (at its top level or in one top folder), it holds {os.listdir(REPO)}"
 
-# 3. profile : where the time of one step goes (benchmarks/profiling.py), the same models and methods, into the same results/<model> folders
-for prefix in ("mlp", "llama", "qwen"):
-    print(f"\n========== {prefix} : profile ==========")
-    OUT = f"{REPO}/results/{prefix}"
-    ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src:{REPO}/benchmarks", "RESULTS": OUT}
-    failed = [name for name in ("adamw", "adamw_fused", "forge_bf16", "forge_int8") if run("benchmarks/profiling.py", prefix, name, cwd = REPO, env = ENV) != 0]
-    if failed: print(f"\nFAILED : {prefix} profile {failed} (see the errors above). The report shows the others.")
-    if run("benchmarks/profiling.py", prefix, "report", cwd = REPO, env = ENV) != 0: print(f"{prefix} : the profile report failed"); continue
-    for png in ("timeline", "host"): display(Image(f"{OUT}/profile_{prefix}_{png}.png"))
-    display(Markdown(open(f"{OUT}/profile_{prefix}_table.md").read()))
+# 2a. the optimizers to run (OPTIMS, top of the cell) and their methods (benchmarks/methods.py : plain Python, no TPU)
+import runpy
+METHODS = runpy.run_path(f"{REPO}/benchmarks/methods.py")["METHODS"]
+RUN = sorted({o.lower() for o in OPTIMS})
+assert RUN and set(RUN) <= set(METHODS), f"STOP : OPTIMS = {OPTIMS}, the known optimizers are {sorted(METHODS)}"
 
-# 4. download profile.zip (folders mlp/, llama/, qwen/). To select the folder : turn on 'Ask where to save each file' in your browser settings
+# 3. profile : where the time of one step goes (benchmarks/profiling.py), for each optimizer, model and method, into results/<optim>/<model>
+for optim in RUN:
+    for prefix in ("mlp", "llama", "qwen"):
+        print(f"\n========== {optim} : {prefix} : profile ==========")
+        OUT = f"{REPO}/results/{optim}/{prefix}"
+        ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src:{REPO}/benchmarks", "RESULTS": OUT, "OPTIM": optim}
+        failed = [name for name in METHODS[optim] if run("benchmarks/profiling.py", prefix, name, cwd = REPO, env = ENV) != 0]
+        if failed: print(f"\nFAILED : {optim} {prefix} profile {failed} (see the errors above). The report shows NA for them.")
+        if run("benchmarks/profiling.py", prefix, "report", cwd = REPO, env = ENV) != 0: print(f"{optim} {prefix} : the profile report failed"); continue
+        for png in ("timeline", "host"): display(Image(f"{OUT}/profile_{prefix}_{png}.png"))
+        display(Markdown(open(f"{OUT}/profile_{prefix}_table.md").read()))
+
+# 4. download profile.zip (folders <optim>/mlp/, <optim>/llama/, <optim>/qwen/). To select the folder : turn on 'Ask where to save each file' in your browser settings
+os.makedirs(f"{REPO}/results", exist_ok = True)
 files.download(shutil.make_archive("/content/profile", "zip", f"{REPO}/results"))

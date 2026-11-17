@@ -1,9 +1,11 @@
 # FORGE TPU : which tiles (bv, bh, bbt) are the fastest for the fused kernel, on every fused layer shape of MLP / Llama 1B / Qwen3 0.6B. One Colab cell (TPU v5e-1 / v6e-1).
-# ~12 min : each model stops after MAX_SECONDS (200 here). No model is built and no transformers is needed : only the kernel on one layer at a time. Result : tiler_table.md
+# ~12 min per optimizer : each model stops after MAX_SECONDS (200 here). No model is built and no transformers is needed : only the kernel on one layer at a time. Result : tiler_table.md
 import os, re, shutil, subprocess, sys, warnings, zipfile
 from IPython.display import Markdown, display
 from google.colab import files
 warnings.filterwarnings("ignore")
+
+OPTIMS = {"adamw", "SGD"}                                              # the optimizers to run (any case) : each one goes to results/<optim>/... Remove one to skip it
 
 QUIET = {"PYTHONWARNINGS": "ignore", "TF_CPP_MIN_LOG_LEVEL": "3", "TPU_STDERR_LOG_LEVEL": "3", "TPU_MIN_LOG_LEVEL": "3", "GLOG_minloglevel": "3", "GRPC_VERBOSITY": "ERROR"}
 NOISE = re.compile(r"^[IW]\d{4} |^WARNING: All log messages|^Successfully renamed PrivateUse1|^Registered Python module|^Device type:|^Initializing TPU|^num_cache|^num_compilations|^peak_compilation|Warning: ")
@@ -30,19 +32,34 @@ print("TPU OK :", dev, os.environ.get("TPU_ACCELERATOR_TYPE", ""))
 '''
 assert run("-c", CHECK) == 0, "STOP : no working TPU (see the message above)"
 
-# 2. the repo zip (benchmarks/, src/, README.md at its top level) -> /content/TRAVELLER
+# 2. the repo zip -> /content/TRAVELLER. Both forms work : benchmarks/, src/, README.md at the top of the zip, or inside one top folder
 REPO = "/content/TRAVELLER"
 shutil.rmtree(REPO, ignore_errors = True)
 zipfile.ZipFile(os.path.abspath(next(iter(files.upload())))).extractall(REPO)
-assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/tiler.py"), f"STOP : the zip must hold src/ and benchmarks/ at its top level, it holds {os.listdir(REPO)}"
-OUT = f"{REPO}/results/tiler"
-ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT, "MAX_SECONDS": "200"}
+inner = [name for name in os.listdir(REPO) if name != "__MACOSX" and not name.startswith(".")]   # __MACOSX : a folder that the macOS zip tool adds
+if not os.path.exists(f"{REPO}/src") and len(inner) == 1 and os.path.isdir(f"{REPO}/{inner[0]}"):   # a zip with one top folder (GitHub : Code > Download ZIP) : move its content up
+    top = f"{REPO}/{inner[0]}"
+    for name in os.listdir(top): shutil.move(f"{top}/{name}", f"{REPO}/{name}")
+    os.rmdir(top)
+shutil.rmtree(f"{REPO}/results", ignore_errors = True)                # results/ of the repo are old runs : a report must never show them in place of a run that failed
+assert os.path.exists(f"{REPO}/src/forge_tpu/__init__.py") and os.path.exists(f"{REPO}/benchmarks/tiler.py"), f"STOP : the zip must hold src/ and benchmarks/ (at its top level or in one top folder), it holds {os.listdir(REPO)}"
 
-# 3. time the triples of each model in its own process (a line per triple), then the tables
-failed = [name for name in ("mlp", "llama", "qwen") if run("benchmarks/tiler.py", name, cwd = REPO, env = ENV) != 0]
-if failed: print(f"\nFAILED : {failed} (see the errors above). The report shows what was timed before the failure.")
-assert run("benchmarks/tiler.py", "report", cwd = REPO, env = ENV) == 0, "STOP : the report failed"
+# 2a. the optimizers to run (OPTIMS, top of the cell) and their methods (benchmarks/methods.py : plain Python, no TPU)
+import runpy
+METHODS = runpy.run_path(f"{REPO}/benchmarks/methods.py")["METHODS"]
+RUN = sorted({o.lower() for o in OPTIMS})
+assert RUN and set(RUN) <= set(METHODS), f"STOP : OPTIMS = {OPTIMS}, the known optimizers are {sorted(METHODS)}"
 
-# 4. show, then download the tables + the raw times (to select the folder : turn on 'Ask where to save each file' in your browser settings)
-display(Markdown(open(f"{OUT}/tiler_table.md").read()))
-files.download(shutil.make_archive("/content/forge_tiler_results", "zip", OUT))
+# 3. each optimizer : time the triples of each model in its own process (a line per triple), then the tables, into results/<optim>/tiler
+for optim in RUN:
+    print(f"\n========== tiler : {optim} ==========")
+    OUT = f"{REPO}/results/{optim}/tiler"
+    ENV = {**os.environ, "PYTHONPATH": f"{REPO}/src", "RESULTS": OUT, "MAX_SECONDS": "200", "OPTIM": optim}
+    failed = [name for name in ("mlp", "llama", "qwen") if run("benchmarks/tiler.py", name, cwd = REPO, env = ENV) != 0]
+    if failed: print(f"\nFAILED : {optim} {failed} (see the errors above). The report shows what was timed before the failure.")
+    if run("benchmarks/tiler.py", "report", cwd = REPO, env = ENV) != 0: print(f"{optim} : the tiler report failed (see the error above)"); continue
+    display(Markdown(open(f"{OUT}/tiler_table.md").read()))
+
+# 4. download the tables + the raw times, folders <optim>/tiler/ (to select the folder : turn on 'Ask where to save each file' in your browser settings)
+os.makedirs(f"{REPO}/results", exist_ok = True)
+files.download(shutil.make_archive("/content/forge_tiler_results", "zip", f"{REPO}/results"))

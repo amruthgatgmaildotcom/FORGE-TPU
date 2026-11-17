@@ -1,6 +1,6 @@
 import importlib, json, os, statistics, sys, time, torch, warnings
 from forge_tpu import _bridge
-from mlp import OPTIMIZERS, LABELS
+from mlp import OPTIM, OPTIMIZERS, LABELS
 
 # Where does the time of one training step go ? For one model and one method (one process each, as the benchmarks), on the same model, data and optimizer as <model>.py.
 # Two ways to run the same step, each WARMUP + STEPS times (median) :
@@ -14,7 +14,7 @@ OUT = os.environ.get("RESULTS", "results")
 PHASES = ("forward", "backward", "step")
 GROUPS = {                                                             # host time groups : the first group whose pattern is in the op name (lower case) takes it
     "FORGE update (Python)": ("fusedlinearfunction",),
-    "optimizer":             ("optimizer.step", "fused_adam", "_foreach", "addcdiv", "addcmul", "lerp"),
+    "optimizer":             ("optimizer.step", "fused_adam", "fused_sgd", "_foreach", "addcdiv", "addcmul", "lerp"),
     "matmul":                ("aten::mm", "aten::addmm", "aten::bmm", "aten::matmul", "aten::linear"),
     "attention":             ("scaled_dot_product", "attention"),
     "autograd engine":       ("autograd::", "backward0", "backward1"),
@@ -110,7 +110,7 @@ def summary(R):
     if R["forge_updates"]: lines.append(f"  FORGE : {R['forge_updates']} fused updates per step, {o['forge python']:.1f} ms of Python in them, replayed launch keys {R['replayed_keys']}, keys on the slow jax_op path {R['keys_on_jax_op']}")
     return "\n".join(lines)
 
-def timeline(P, title, path):
+def timeline(P, title, path, missing = ()):
     # one step on a time axis, two lanes per method. "as benchmark" : when Python issues each phase, then (grey) Python waits for the TPU to finish.
     # "sync per phase" : each phase alone. dark = Python issuing (the TPU works at the same time), light = only the TPU works, Python waits
     import matplotlib.pyplot as plt
@@ -136,11 +136,12 @@ def timeline(P, title, path):
     ax.set_xlim(0, max(max(P[n]["overlapped"]["done"], sum(P[n]["split"][p]["done"] for p in PHASES)) for n in names) * 1.12)
     ax.legend(handles = [Patch(color = PHASE_COLORS[p], label = f"{p} : Python issues ops (TPU works too)") for p in PHASES] +
               [Patch(color = PHASE_COLORS["backward"], alpha = 0.3, label = "light : only the TPU works, Python waits"), Patch(color = WAIT, label = "grey : Python is done, the TPU finishes the step")],
-              fontsize = 9, ncol = 3, loc = "upper center", bbox_to_anchor = (0.5, -0.14), frameon = False)
+              fontsize = 9, ncol = 3, loc = "upper center", bbox_to_anchor = (0.5, 0), borderaxespad = 4.5, frameon = False)   # a fixed distance under the axis (in font sizes) : with few methods the plot is short
     ax.set_title(f"{title} : where the time of one step goes", fontsize = 15, fontweight = "bold", loc = "left"); ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout(); fig.savefig(path, dpi = 200); plt.close(fig)
+    if missing: ax.text(1, 1.02, "NA (the run failed, not drawn) : " + ", ".join(LABELS[n] for n in missing), transform = ax.transAxes, ha = "right", va = "bottom", color = "#c62828", fontsize = 11)
+    fig.tight_layout(); fig.savefig(path, dpi = 200, bbox_inches = "tight"); plt.close(fig)
 
-def host_groups(P, title, path):
+def host_groups(P, title, path, missing = ()):
     # host (Python + PyTorch) time of each phase, in groups, one stacked bar per method. Under the profiler (slower than a real step)
     import matplotlib.pyplot as plt
     names = list(P); fig, axes = plt.subplots(1, 3, figsize = (17, 1.6 + 0.6 * len(names)), sharey = True)
@@ -155,14 +156,15 @@ def host_groups(P, title, path):
         ax.spines[["top", "right"]].set_visible(False); ax.set_xlim(0, max(sum(P[n]["host"][p].values()) for n in names) * 1.25 + 1e-3)
     axes[0].set_yticks(range(len(names)), [LABELS[n] for n in reversed(names)], fontsize = 11)
     handles, labels = axes[1].get_legend_handles_labels()
-    fig.legend(handles, labels, ncol = 5, fontsize = 9, loc = "lower center", frameon = False)
+    fig.legend(handles, labels, ncol = 5, fontsize = 9, loc = "upper center", bbox_to_anchor = (0.5, 0), frameon = False)   # under the figure (savefig : bbox_inches tight), so it never covers the x labels
     fig.suptitle(f"{title} : what Python / PyTorch does on the host in each phase", x = 0.01, ha = "left", fontsize = 14, fontweight = "bold")
-    fig.tight_layout(rect = (0, 0.1, 1, 1)); fig.savefig(path, dpi = 200); plt.close(fig)
+    if missing: fig.text(0.99, 0.99, "NA (the run failed, not drawn) : " + ", ".join(LABELS[n] for n in missing), ha = "right", va = "top", color = "#c62828", fontsize = 11)
+    fig.tight_layout(); fig.savefig(path, dpi = 200, bbox_inches = "tight"); plt.close(fig)
 
-def simple(P, title):
+def simple(P, title, missing = ()):
     # the short form : one row per phase, one column per method (ms)
-    names = list(P); o = {n: P[n]["overlapped"] for n in names}; s = {n: P[n]["split"] for n in names}
-    row = lambda label, f: f"| {label} | " + " | ".join(f(n) for n in names) + " |"
+    o = {n: P[n]["overlapped"] for n in P}; s = {n: P[n]["split"] for n in P}; names = [n for n in OPTIMIZERS if n in P or n in missing]   # missing : the run failed, NA in its column
+    row = lambda label, f: f"| {label} | " + " | ".join("NA" if n in missing else f(n) for n in names) + " |"
     rows = [f"### {title} : where the time of one step goes (ms, median of {STEPS} steps)", "", "| | " + " | ".join(LABELS[n] for n in names) + " |", "|---|" + ":--:|" * len(names),
             "| **Sync after each phase** |" + " |" * len(names),
             row("Forward", lambda n: f"{s[n]['forward']['done']:.1f}"),
@@ -175,25 +177,29 @@ def simple(P, title):
             row("Step time (TPU done)", lambda n: f"**{o[n]['done']:.1f}**"),
             row("of which FORGE Python", lambda n: f"{o[n]['forge python']:.1f}" if P[n]["forge_updates"] else "-"),
             row("FORGE updates per step", lambda n: str(P[n]["forge_updates"]) if P[n]["forge_updates"] else "-")]
+    if missing: rows += ["", "NA : the run failed (" + ", ".join(LABELS[n] for n in missing) + ")"]
     return "\n".join(rows)
 
-def table(P, title):
-    rows = [simple(P, title), "", f"### {title} : profile in detail (median of {STEPS} steps, after {WARMUP} warmup steps)", "",
+def table(P, title, missing = ()):
+    rows = [simple(P, title, missing), "", f"### {title} : profile in detail (median of {STEPS} steps, after {WARMUP} warmup steps)", "",
             "| Method | Step as benchmark (ms) | Python done issuing (ms) | Forward : Python / TPU done | Backward : Python / TPU done | Step : Python / TPU done | FORGE Python (ms) |",
             "|---|:--:|:--:|:--:|:--:|:--:|:--:|"]
-    for n, r in P.items():
-        o, s = r["overlapped"], r["split"]
+    for n in (n for n in OPTIMIZERS if n in P or n in missing):
+        if n in missing: rows.append(f"| {LABELS[n]} | NA | NA | NA | NA | NA | NA |"); continue
+        o, s = P[n]["overlapped"], P[n]["split"]
         rows.append(f"| {LABELS[n]} | {o['done']:.1f} | {o['step']:.1f} | " + " | ".join(f"{s[p]['host']:.1f} / {s[p]['done']:.1f}" for p in PHASES) + f" | {o['forge python']:.1f} |")
     rows += ["", "Host time per phase (ms, under the profiler), the 3 largest groups :", "", "| Method | Forward | Backward | Step |", "|---|---|---|---|"]
     top = lambda d: ", ".join(f"{g} {v:.1f}" for g, v in sorted(d.items(), key = lambda kv: -kv[1])[:3])
-    rows += [f"| {LABELS[n]} | " + " | ".join(top(r["host"][p]) for p in PHASES) + " |" for n, r in P.items()]
+    rows += [f"| {LABELS[n]} | NA | NA | NA |" if n in missing else f"| {LABELS[n]} | " + " | ".join(top(P[n]["host"][p]) for p in PHASES) + " |" for n in OPTIMIZERS if n in P or n in missing]
     return "\n".join(rows)
 
 def report(prefix):
     P = {n: json.load(open(f"{OUT}/profile_{prefix}_{n}.json")) for n in OPTIMIZERS if os.path.exists(f"{OUT}/profile_{prefix}_{n}.json")}
-    title = {"mlp": "MLP", "llama": "Llama-3.2-1B", "qwen": "Qwen3-0.6B"}.get(prefix, prefix)
-    timeline(P, title, f"{OUT}/profile_{prefix}_timeline.png"); host_groups(P, title, f"{OUT}/profile_{prefix}_host.png")
-    md = table(P, title); open(f"{OUT}/profile_{prefix}_table.md", "w").write(md + "\n")
+    missing = [n for n in OPTIMIZERS if n not in P]                    # runs that failed : NA in the tables, a note on the plots
+    if not P: raise SystemExit(f"profile {prefix} ({OPTIM}) : no run finished, nothing to report")
+    title = {"mlp": "MLP", "llama": "Llama-3.2-1B", "qwen": "Qwen3-0.6B"}.get(prefix, prefix) + f" ({OPTIM})"
+    timeline(P, title, f"{OUT}/profile_{prefix}_timeline.png", missing); host_groups(P, title, f"{OUT}/profile_{prefix}_host.png", missing)
+    md = table(P, title, missing); open(f"{OUT}/profile_{prefix}_table.md", "w").write(md + "\n")
     print("\n\n".join(summary(r) for r in P.values()) + "\n\n" + md)
 
 
