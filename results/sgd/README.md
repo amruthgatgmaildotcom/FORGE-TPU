@@ -1,8 +1,10 @@
 # SGD results (TPU v5e-1)
 
+Written by `benchmarks/readme.py` from the files in this folder. Do not edit by hand.
+
 ## MLP
 
-MLP 1.09B params (8 blocks, D=4096, FF=16384), 4096 tokens per step, sgd, bf16 weights, single TPU. Step time is the median of 265 steps (± std), after 10 warmup steps.
+MLP, 1.09B params, sgd. Step time : median (± std) of 265 to 286 timed steps of each run, after 10 warmup steps. Peak : the largest step peak above the data.
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
@@ -59,7 +61,7 @@ Host time per phase (ms, under the profiler), the 3 largest groups :
 
 ## Llama-3.2-1B
 
-Llama-3.2-1B (transformers), 1.24B params (random init), batch 1, sequence 1024, sgd, bf16 weights, single TPU. Step time is the median of 290 steps (± std), after 10 warmup steps.
+Llama-3.2-1B, 1.24B params, sgd. Step time : median (± std) of 290 timed steps of each run, after 10 warmup steps. Peak : the largest step peak above the data.
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
@@ -116,7 +118,7 @@ Host time per phase (ms, under the profiler), the 3 largest groups :
 
 ## Qwen3-0.6B
 
-Qwen3-0.6B (transformers), 0.60B params (random init), batch 1, sequence 1024, sgd, bf16 weights, single TPU. Step time is the median of 990 steps (± std), after 10 warmup steps.
+Qwen3-0.6B, 0.60B params, sgd. Step time : median (± std) of 990 timed steps of each run, after 10 warmup steps. Peak : the largest step peak above the data.
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|

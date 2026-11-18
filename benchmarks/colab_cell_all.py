@@ -89,4 +89,5 @@ for optim in RUN if RUN_PROFILING else ():
 
 # 5. download results.zip (folders <optim>/<model>/ : benchmarks and profiles, <optim>/tests/ : correctness). To select the folder : turn on 'Ask where to save each file' in your browser settings
 os.makedirs(f"{REPO}/results", exist_ok = True)
+if run("benchmarks/readme.py", cwd = REPO) != 0: print("readme.py failed : results.zip has no results/<optim>/README.md")   # results/<optim>/README.md from the new results (no TPU)
 files.download(shutil.make_archive("/content/results", "zip", f"{REPO}/results"))
