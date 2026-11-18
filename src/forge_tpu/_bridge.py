@@ -145,7 +145,7 @@ def _launch(call, inputs, donated, key):
     module, caught = pallas.tpu_torch_pallas, {}                                                                                      #
     class _Catch:                                                                                                                     # stands in for torch_tpu's C++ module during call()
         def __getattr__(self, name): return getattr(module, name)                                                                     #
-        def call_custom_kernel(self, *args, **kwargs): c*+a-ught.update(args = args, kwargs = kwargs); return module.call_custom_kernel(*args, **kwargs)
+        def call_custom_kernel(self, *args, **kwargs): caught.update(args = args, kwargs = kwargs); return module.call_custom_kernel(*args, **kwargs)
     pallas.tpu_torch_pallas = _Catch()                                                                                                #
     try: out = _in_place_or_raise(call, donated, key)                                                                                 #
     finally: pallas.tpu_torch_pallas = module                                                                                         #
