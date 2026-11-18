@@ -79,7 +79,8 @@ class int8:
     def encode(state, out):
         bv, bh = state.shape; state_reshaped = state.reshape(bv//64, 64, bh)
         scale = jnp.max(jnp.abs(state_reshaped), axis = 1) / 127 + 1e-12
-        q = jnp.clip(jnp.round(state_reshaped / scale[:, None, :]), -127, 127)
+        inverse = 1 / scale                                                                                   # one divide per (64-row group, column), not one per element
+        q = jnp.clip(jnp.round(state_reshaped * inverse[:, None, :]), -127, 127)
         out["q"][...] = q.reshape(bv, bh).astype(jnp.int8)
         out["scale"][...] = scale
     #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#

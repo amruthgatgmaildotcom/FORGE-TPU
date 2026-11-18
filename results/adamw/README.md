@@ -1,8 +1,10 @@
 # AdamW results (TPU v5e-1)
 
+Written by `benchmarks/readme.py` from the files in this folder. Do not edit by hand.
+
 ## MLP
 
-MLP 1.09B params (8 blocks, D=4096, FF=16384), 4096 tokens per step, adamw, bf16 weights, single TPU. Step time is the median of 213 steps (± std), after 10 warmup steps.
+MLP, 1.09B params, adamw. Step time : median (± std) of 213 to 260 timed steps of each run, after 10 warmup steps. Peak : the largest step peak above the data.
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
@@ -63,7 +65,7 @@ Host time per phase (ms, under the profiler), the 3 largest groups :
 
 ## Llama-3.2-1B
 
-Llama-3.2-1B (transformers), 1.24B params (random init), batch 1, sequence 1024, adamw, bf16 weights, single TPU. Step time is the median of 210 steps (± std), after 10 warmup steps.
+Llama-3.2-1B, 1.24B params, adamw. Step time : median (± std) of 208 to 256 timed steps of each run, after 10 warmup steps. Peak : the largest step peak above the data.
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
@@ -124,7 +126,7 @@ Host time per phase (ms, under the profiler), the 3 largest groups :
 
 ## Qwen3-0.6B
 
-Qwen3-0.6B (transformers), 0.60B params (random init), batch 1, sequence 1024, adamw, bf16 weights, single TPU. Step time is the median of 990 steps (± std), after 10 warmup steps.
+Qwen3-0.6B, 0.60B params, adamw. Step time : median (± std) of 990 timed steps of each run, after 10 warmup steps. Peak : the largest step peak above the data.
 
 | Method | Peak (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|
