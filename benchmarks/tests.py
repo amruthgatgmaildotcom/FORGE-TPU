@@ -1,18 +1,23 @@
 import gc, math, os, re, torch, torch.nn as nn, torch.nn.functional as F
-from forge_tpu import FusedLinear
+from forge_tpu import FusedLinear, Muon, MuonStep, Steps
+from forge_tpu.muon import newton_schulz, scale as muon_scale
 import llama as L
-from methods import OPTIM, OPTIMIZERS                                 # the optimizer of this run (OPTIM) : adamw against torch.optim.AdamW, sgd against torch.optim.SGD
+from config import OPTIM, METHODS, tests_path
 
-# FORGE correctness : every check compares FORGE with PyTorch. The reference is PyTorch on CPU in fp32 / fp64 (assumed correct). One optimizer per run (OPTIM).
-# SGD (no momentum) has no state : the checks of m and v and the int8 cases are AdamW only.
-# As in FORGE (dk4248) tests/test_correctness.py : one AdamW step from a non-zero state (step 5), the same (BT, V, H) shapes, the same tolerances.
-# Added : bf16-stored values must be at most 1 bf16 ulp from the rounded reference, real-model gradient sizes, several steps through two layers
-# (the TPU replay path and the dx order), and a small Llama trained with all four methods against the fp32 reference.
+#   Readme.md
+#     python benchmarks/tests.py      (environment : OPTIM, see config.py)  ->  results/<optim>/tests.md : every check, its error, its tolerance, PASS or FAIL
+#     FORGE correctness : every check compares FORGE with PyTorch. The reference is PyTorch on CPU in fp32 / fp64 (assumed correct). One optimizer per run (OPTIM).
+#     SGD (no momentum) has no state : the checks of m and v and the int8 cases are AdamW only. Muon : the momentum and the weight after Newton-Schulz.
+#     As the FORGE reference tests (tests/test_correctness.py) : one AdamW step from a non-zero state (step 5), the same (BT, V, H) shapes, the same tolerances.
+#     Added : bf16-stored values must be at most 1 bf16 ulp from the rounded reference, real-model gradient sizes, several steps through two layers
+#     (the TPU replay path and the dx order), and a small Llama (llama.py's model) trained with every method against the fp32 reference.
 DEVICE = "tpu"
 TOL, QTOL, ULP, BASE = 5e-3, 5e-2, 1.0, 2.0     # fp32 paths, int8 state (as in FORGE tests) | bf16-stored values, in ulps | model : FORGE error <= BASE x PyTorch bf16 error
+MU, NSTOL = 0.95, 1e-1                          # Muon : momentum (FORGE paper) | the w update after Newton-Schulz : NS runs in bf16 by design (Keller Jordan's Muon), on the TPU here and on the CPU
+                                                # in the reference, and bf16 NS amplifies 1-ulp input differences to a few % of the update. A wrong lr, scale, sign, decay or transpose : >= 30 %
 LR, B1, B2, EPS, WD = 1e-3, 0.9, 0.999, 1e-8, 0.01
 SHAPES = [(128, 256, 128), (64, 512, 256), (256, 1024, 512), (1500, 1536, 2048)]   # (BT, V, H) : the 3 FORGE test shapes + a multi-tile one with a partial BT tile
-OUT = os.environ.get("RESULTS", "results")
+OPTIMIZERS = METHODS[OPTIM]                                            # the methods of this run, vanilla torch first
 RESULTS = []                                                           # (case, check, error, tolerance)
 NA = []                                                                # (case, why) : a method that could not run (e.g. fused SGD not supported on this TPU)
 
@@ -49,21 +54,32 @@ def torch_sgd(w, g):
     torch.optim.SGD([p], lr = LR, weight_decay = WD).step()
     return (p.detach(),)
 
+def torch_muon(w, g, m):
+    # the reference for muon (the FORGE paper's Muon) : B = MU B + G in fp32, then the same Newton-Schulz on the CPU, W (1 - lr wd) - lr s O in fp32. Returns (w, B)
+    B = MU * m.float().cpu() + g.float().cpu()
+    O = newton_schulz(B).float()
+    return w.detach().float().cpu() * (1 - LR * WD) - LR * muon_scale(w.shape) * O, B
+
 def reference(w, g, m, v, step):                                       # the torch step of this run's optimizer
+    if OPTIM == "muon": return torch_muon(w, g, m)
     return torch_adamw(w, g, m, v, step) if OPTIM == "adamw" else torch_sgd(w, g)
+
+def post_step(*layers):                                                # muon : Newton-Schulz + the weight update, after backward (FORGE fuses only the momentum)
+    if OPTIM == "muon": MuonStep(nn.ModuleList(layers)).step()
 
 def forge_layer(w, mode, b = None):
     lin = nn.Linear(w.shape[1], w.shape[0], bias = b is not None, device = DEVICE, dtype = w.dtype)
     with torch.no_grad():
         lin.weight.copy_(w.to(DEVICE))
         if b is not None: lin.bias.copy_(b.to(DEVICE))
-    kwargs = dict(state_mode = mode, beta1 = B1, beta2 = B2, eps = EPS) if OPTIM == "adamw" else dict(optimizer_type = "sgd")   # sgd : no state, no state_mode
+    kwargs = {"adamw": dict(state_mode = mode, beta1 = B1, beta2 = B2, eps = EPS), "sgd": dict(optimizer_type = "sgd"), "muon": dict(optimizer_type = "muon", momentum = MU)}[OPTIM]   # sgd : no state
     layer = FusedLinear.from_linear(lin, lr = LR, weight_decay = WD, **kwargs).train()
     layer.fusedStateObject.ensure_buffers(layer.weight)
     return layer
 
-def get_state(layer):                                                  # (m, v) as fp32 on CPU, int8 decoded (no floor). sgd : (None, None)
-    if OPTIM != "adamw": return None, None
+def get_state(layer):                                                  # (m, v) as fp32 on CPU, int8 decoded (no floor). sgd : (None, None), muon : (m, None)
+    if OPTIM == "sgd": return None, None
+    if OPTIM == "muon": return layer.fusedStateObject.buffers["m"]["data"].float().cpu(), None
     def read(a):
         if "data" in a: return a["data"].float().cpu()
         q, scale = a["q"].float().cpu(), a["scale"].float().cpu()
@@ -74,7 +90,8 @@ def get_state(layer):                                                  # (m, v) 
 def set_state(layer, m, v, step):                                      # state after step - 1 steps, stored as FORGE stores it
     state = layer.fusedStateObject
     state.step = step - 1
-    if OPTIM != "adamw": return                                        # sgd : no state
+    if OPTIM == "sgd": return                                          # sgd : no state
+    if OPTIM == "muon": state.buffers["m"]["data"].copy_(m.to(DEVICE, torch.bfloat16)); return
     for a, t in ((state.buffers["m"], m), (state.buffers["v"], v)):
         if "data" in a: a["data"].copy_(t.to(DEVICE, a["data"].dtype)); continue
         blocks = t.view(t.shape[0] // 64, 64, -1)
@@ -86,7 +103,19 @@ def update_checks(layer, w_old, ref, mode):
     w, (m, v) = layer.weight, get_state(layer)
     ew = ulps(w, ref[0]) if w.dtype == torch.bfloat16 else rel(w.float().cpu() - w_old.float(), ref[0] - w_old.float())
     unit = "ulp" if w.dtype == torch.bfloat16 else "rel"
-    if OPTIM != "adamw": return [(f"w({unit})", ew, ULP if unit == "ulp" else TOL)]   # sgd : no state to check
+    if OPTIM == "sgd": return [(f"w({unit})", ew, ULP if unit == "ulp" else TOL)]   # sgd : no state to check
+    if OPTIM == "muon":
+        # m : FORGE's fused momentum against the fp32 reference B = MU B + G (1 ulp). w : the step after backward, from FORGE's OWN momentum (so it checks lr, scale, decay, sign,
+        # transpose, not the bf16 NS noise twice) : W (1 - lr wd) - lr s NS(m) on the CPU. fp32 w : relative error of the update. bf16 w : the update lr s O (~1e-4) is about one bf16
+        # ulp of w, so each element may be off by its ulp + NSTOL x the update size. 1.0 = at that limit
+        own = w_old.float().cpu() * (1 - LR * WD) - LR * muon_scale(w_old.shape) * newton_schulz(m).float()
+        ew = rel(w.float().cpu() - w_old.float(), own - w_old.float())
+        if unit == "ulp":
+            r, a = own.double(), w.detach().double().cpu()
+            step = (r - w_old.double().cpu() * (1 - LR * WD)).abs().max().item()     # lr s max|O|
+            ulp = torch.pow(2.0, torch.frexp(r.to(torch.bfloat16).double())[1] - 8.0)
+            ew, unit = ((a - r.to(torch.bfloat16).double()).abs() / (ulp + NSTOL * step)).max().item(), "ulp+NS"
+        return [(f"w({unit})", ew, 1.0 if unit == "ulp+NS" else NSTOL), ("m", ulps(m, ref[1]), ULP)]
     es = [rel(a, b) if mode == "int8" else ulps(a, b) for a, b in ((m, ref[1]), (v, ref[2]))]
     return [(f"w({unit})", ew, ULP if unit == "ulp" else TOL), ("m", es[0], QTOL if mode == "int8" else ULP), ("v", es[1], QTOL if mode == "int8" else ULP)]
 
@@ -114,7 +143,7 @@ def layer_step(BT, V, H, wdtype, mode, scale = 1.0, bias = False):
     set_state(layer, m, v, step = 5)
     m0, v0 = get_state(layer)                                          # what FORGE really holds : the reference starts from it
     xd = x.to(DEVICE).requires_grad_()
-    y = layer(xd); y.backward(go.to(DEVICE))
+    y = layer(xd); y.backward(go.to(DEVICE)); post_step(layer)
     y_ref = x.double() @ w.double().T + (0 if b is None else b.double())
     items = [("y", rel(y, y_ref), TOL), ("dx", rel(xd.grad, go.double() @ w.double()), TOL)]
     if bias: items.append(("db", rel(layer.bias.grad, go.double().sum(0)), TOL))
@@ -132,7 +161,7 @@ def chain(mode, steps = 10, BT = 512, H = 1024):
         before = [(l.weight.detach().cpu().clone(), *get_state(l)) for l in (l1, l2)]
         x = torch.randn(BT, H, generator = g).to(torch.bfloat16).to(DEVICE).requires_grad_()
         go = torch.randn(BT, H, generator = g).to(torch.bfloat16)
-        h = l1(x); h.retain_grad(); l2(h).backward(go.to(DEVICE))
+        h = l1(x); h.retain_grad(); l2(h).backward(go.to(DEVICE)); post_step(l1, l2)
         (w1, m1, v1), (w2, m2, v2) = before
         hc, dh = h.detach().cpu().double(), h.grad.cpu().double()      # what the TPU really gave l2 and l1
         items = [("dh", rel(dh, go.double() @ w2.double()), TOL), ("dx", rel(x.grad, dh @ w1.double()), TOL)]
@@ -160,7 +189,11 @@ def model_check(steps = 30):
     L.HD = L.D // L.HEADS
     data = L.make_data()
     torch.manual_seed(0); ref = L.Llama().to(torch.bfloat16).float()   # the same init as make_model, in fp32 on CPU
-    ref_opt = (torch.optim.AdamW if OPTIM == "adamw" else torch.optim.SGD)(ref.parameters(), lr = L.LR, weight_decay = L.WD, foreach = False)
+    if OPTIM == "muon":                                                # the FORGE paper's Muon on the layers' Linears (fp32, CPU), AdamW on the rest, as llama.py's make_model
+        weights = [m.weight for m in ref.model.layers.modules() if isinstance(m, nn.Linear)]
+        rest = [p for p in ref.parameters() if id(p) not in {id(w) for w in weights}]
+        ref_opt = Steps(Muon(weights, lr = L.MUON_LR, weight_decay = L.WD), torch.optim.AdamW(rest, lr = L.LR, weight_decay = L.WD, foreach = False))
+    else: ref_opt = (torch.optim.AdamW if OPTIM == "adamw" else torch.optim.SGD)(ref.parameters(), lr = L.LR, weight_decay = L.WD, foreach = False)
     R = {"reference": train(ref, ref_opt, [(x.cpu(), y.cpu()) for x, y in data], steps)}
     for name in OPTIMIZERS:
         try:
@@ -192,14 +225,14 @@ def report():
     rows = [f"# FORGE correctness ({OPTIM}) : {len(RESULTS) - len(fails)} / {len(RESULTS)} checks pass" + (f", {len(NA)} NA" if NA else ""), "", "| case | check | error | tolerance | result |", "|---|---|--:|--:|:--:|"]
     rows += [f"| {c} | {k} | {e:.3g} | {t:.3g} | {'PASS' if e <= t else '**FAIL**'} |" for c, k, e, t in RESULTS]
     rows += [f"| {c} | {why} | NA | NA | NA |" for c, why in NA]        # could not run : not a pass, not a fail
-    os.makedirs(OUT, exist_ok = True); open(f"{OUT}/tests_report.md", "w").write("\n".join(rows) + "\n")
+    os.makedirs(os.path.dirname(tests_path(OPTIM)), exist_ok = True); open(tests_path(OPTIM), "w").write("\n".join(rows) + "\n")
     print(rows[0][2:])
     for c, k, e, t in fails: print(f"  FAIL  {c} : {k} = {e:.3g} > {t:.3g}")
 
 
 def main():
     module_checks()
-    modes = ("bf16", "int8") if OPTIM == "adamw" else (None,)          # sgd : no state, no state_mode
+    modes = {"adamw": ("bf16", "int8"), "muon": ("bf16",)}.get(OPTIM, (None,))   # sgd : no state, no state_mode. muon : bf16 momentum only
     for mode in modes:
         for wdtype in (torch.float32, torch.bfloat16):
             for shape in SHAPES: layer_step(*shape, wdtype, mode)
