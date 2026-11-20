@@ -1,0 +1,172 @@
+[
+ {
+  "run": "install_uv",
+  "code": 0,
+  "minutes": 0.0
+ },
+ {
+  "run": "install_packages_1",
+  "code": 0,
+  "minutes": 0.0
+ },
+ {
+  "run": "install_packages_2",
+  "code": 0,
+  "minutes": 0.0
+ },
+ {
+  "run": "tpu_check",
+  "code": 0,
+  "minutes": 0.1
+ },
+ {
+  "run": "smoke_adamw",
+  "code": 0,
+  "minutes": 0.5
+ },
+ {
+  "run": "smoke_muon",
+  "code": 0,
+  "minutes": 0.5
+ },
+ {
+  "run": "tests_adamw",
+  "code": 0,
+  "minutes": 1.4
+ },
+ {
+  "run": "bench_adamw_llama8b_seq512_adamw",
+  "code": 0,
+  "minutes": 1.7
+ },
+ {
+  "run": "bench_adamw_llama8b_seq512_adamw_fused",
+  "code": 0,
+  "minutes": 1.6
+ },
+ {
+  "run": "bench_adamw_llama8b_seq512_forge_bf16",
+  "code": 0,
+  "minutes": 1.7
+ },
+ {
+  "run": "bench_adamw_llama8b_seq512_forge_int8",
+  "code": 0,
+  "minutes": 1.7
+ },
+ {
+  "run": "report_adamw_llama8b_seq512",
+  "code": 0,
+  "minutes": 0.1
+ },
+ {
+  "run": "bench_adamw_llama8b_seq1024_adamw",
+  "code": 0,
+  "minutes": 1.8
+ },
+ {
+  "run": "bench_adamw_llama8b_seq1024_adamw_fused",
+  "code": 0,
+  "minutes": 1.6
+ },
+ {
+  "run": "bench_adamw_llama8b_seq1024_forge_bf16",
+  "code": 0,
+  "minutes": 1.7
+ },
+ {
+  "run": "bench_adamw_llama8b_seq1024_forge_int8",
+  "code": 0,
+  "minutes": 1.8
+ },
+ {
+  "run": "report_adamw_llama8b_seq1024",
+  "code": 0,
+  "minutes": 0.1
+ },
+ {
+  "run": "tests_muon",
+  "code": 0,
+  "minutes": 36.6
+ },
+ {
+  "run": "bench_muon_llama8b_seq512_muon",
+  "code": 0,
+  "minutes": 8.8
+ },
+ {
+  "run": "bench_muon_llama8b_seq512_forge_muon",
+  "code": 0,
+  "minutes": 8.6
+ },
+ {
+  "run": "report_muon_llama8b_seq512",
+  "code": 0,
+  "minutes": 0.1
+ },
+ {
+  "run": "bench_muon_llama8b_seq1024_muon",
+  "code": 0,
+  "minutes": 9.0
+ },
+ {
+  "run": "bench_muon_llama8b_seq1024_forge_muon",
+  "code": 0,
+  "minutes": 8.7
+ },
+ {
+  "run": "report_muon_llama8b_seq1024",
+  "code": 0,
+  "minutes": 0.1
+ },
+ {
+  "run": "profile_adamw_llama8b_seq512_adamw",
+  "code": 0,
+  "minutes": 1.0
+ },
+ {
+  "run": "profile_adamw_llama8b_seq512_adamw_fused",
+  "code": 0,
+  "minutes": 1.0
+ },
+ {
+  "run": "profile_adamw_llama8b_seq512_forge_bf16",
+  "code": 0,
+  "minutes": 1.1
+ },
+ {
+  "run": "profile_adamw_llama8b_seq512_forge_int8",
+  "code": 0,
+  "minutes": 1.0
+ },
+ {
+  "run": "report_adamw_llama8b_seq512",
+  "code": 0,
+  "minutes": 0.1
+ },
+ {
+  "run": "profile_adamw_llama8b_seq1024_adamw",
+  "code": 0,
+  "minutes": 1.1
+ },
+ {
+  "run": "profile_adamw_llama8b_seq1024_adamw_fused",
+  "code": 0,
+  "minutes": 1.1
+ },
+ {
+  "run": "profile_adamw_llama8b_seq1024_forge_bf16",
+  "code": 0,
+  "minutes": 1.0
+ },
+ {
+  "run": "profile_adamw_llama8b_seq1024_forge_int8",
+  "code": 0,
+  "minutes": 1.1
+ },
+ {
+  "run": "report_adamw_llama8b_seq1024",
+  "code": 0,
+  "minutes": 0.1
+ }
+]

@@ -1,8 +1,9 @@
 import functools, itertools, json, math, os, sys, time, torch
 import jax, jax.numpy as jnp
 from forge_tpu import _bridge, kernel
-from methods import OPTIM                                              # the optimizer of this run (OPTIM, benchmarks/methods.py)
+from config import OPTIM, tiler_path
 
+#   python benchmarks/tiler.py <model>  (then  python benchmarks/tiler.py report)  ->  results/tiler/<model>.json, results/tiler/tiles.md
 # Which tiles (bv, bh, bbt) are the fastest ? The kernel uses one fixed triple for every layer (kernel/_utils.py DEFAULT_TILES). This file times many triples on
 # every fused layer shape of the three benchmark models : only the fused update of ONE layer (random go, x, w), not a training step.
 # KERNEL TIME ONLY : one torch op launch costs about 0.2 ms of Python (more than the kernel of a small layer), so a timed loop of launches measures Python, not the kernel.
@@ -13,13 +14,16 @@ from methods import OPTIM                                              # the opt
 DEVICE, DTYPE = "tpu", torch.bfloat16
 MODELS = {"mlp":   (4096, {(16384, 4096): 8, (4096, 16384): 8, (4096, 4096): 1}),                                    # name : (BT, {(V, H) : how many such fused layers})
           "llama": (1024, {(2048, 2048): 32, (512, 2048): 32, (8192, 2048): 32, (2048, 8192): 16}),                 # q o | k v | gate up | down, x 16 layers
-          "qwen":  (1024, {(2048, 1024): 28, (1024, 1024): 56, (1024, 2048): 28, (3072, 1024): 56, (1024, 3072): 28})}   # q | k v | o | gate up | down, x 28 layers
-BV, BH, BBT = (512, 1024, 2048), (512, 1024, 2048), (512, 1024, 2048)  # every combination is tried (cut to the layer : bv <= V, bh <= H, bbt <= BT)
+          "qwen":  (1024, {(2048, 1024): 28, (1024, 1024): 56, (1024, 2048): 28, (3072, 1024): 56, (1024, 3072): 28}),
+          # Llama-3.1-8B split over 8 chips (kaggle/tp.py) : the layer shapes of ONE chip, so one Colab chip times exactly what each Kaggle chip runs. q | k v | o | gate up | down, x 32 layers
+          "llama8b_seq512":  (512,  {(512, 4096): 32, (128, 4096): 64, (4096, 512): 32, (1792, 4096): 64, (4096, 1792): 32}),
+          "llama8b_seq1024": (1024, {(512, 4096): 32, (128, 4096): 64, (4096, 512): 32, (1792, 4096): 64, (4096, 1792): 32})}   # q | k v | o | gate up | down, x 28 layers
+BV, BH, BBT = (256, 512, 1024, 2048), (512, 1024, 2048, 4096), (512, 1024, 2048)  # every combination is tried (cut to the layer : bv <= V, bh <= H, bbt <= BT)
 DEFAULT = kernel._utils.DEFAULT_TILES
 VMEM = 64 * 2**20                                                      # the kernel's limit (kernel/_utils.py compiler_params). A triple that needs more (rough count, see fits) is not tried
 REPS, TRIES = 20, 3                                                    # ms of a triple = (2 x REPS kernels - REPS kernels) / REPS, each time the best of TRIES (see time_tiles)
 MAX_SECONDS, INT8_SHARE = float(os.environ.get("MAX_SECONDS", 200)), 0.2   # per model. bf16 states get 1 - INT8_SHARE of it, then int8 states : only the default and the best bf16 triple
-OUT = os.environ.get("RESULTS", "results")
+OUT = os.path.dirname(tiler_path("x"))                                                       # results/tiler
 STATEFUL = bool(kernel.OPTIMIZERS[OPTIM].states)                       # SGD has no state : one pass only (no int8 pass, no state_mode)
 MAIN = "bf16 states" if STATEFUL else "no state"                       # what the main pass (key "bf16" in the json) is
 
@@ -47,7 +51,8 @@ def repeat(scalars: jax.Array, count: jax.Array, inputs: list[jax.Array], w: jax
     # pure JAX : the fused update of _bridge._run, count[0] times in a row inside one program (each w and states are the input of the next). Returns (w, *states)
     def body(_, carry):
         w, *flat = carry
-        return _bridge._run(scalars, inputs, w, flat, optimizer = optimizer, state_mode = state_mode, interpret = interpret, tiles = tiles)
+        out = _bridge._run(scalars, inputs, w, flat, optimizer = optimizer, state_mode = state_mode, interpret = interpret, tiles = tiles)
+        return out if len(out) == 1 + len(flat) else (w, *out)                                       # Muon : the kernel gives the states only
     return jax.lax.fori_loop(0, count[0], body, (w, *states))
 
 @functools.cache
@@ -88,7 +93,7 @@ def time_tiles(layer, mode, tiles):
 
 def measure(name):
     BT, shapes = MODELS[name]
-    R, start, path = {"name": name, "optimizer": OPTIM, "BT": BT, "default": list(DEFAULT), "shapes": []}, time.perf_counter(), f"{OUT}/tiler_{name}.json"
+    R, start, path = {"name": name, "optimizer": OPTIM, "BT": BT, "default": list(DEFAULT), "shapes": []}, time.perf_counter(), tiler_path(f"{name}.json")
     left = lambda: MAX_SECONDS - (time.perf_counter() - start)
     for n, ((V, H), count) in enumerate(shapes.items()):
         g = torch.Generator().manual_seed(0)
@@ -131,7 +136,7 @@ def table(R):
     return "\n".join(rows), {t: ms / total(d) for ms, t in whole} if total(d) else {}
 
 def report():
-    R = [json.load(open(f"{OUT}/tiler_{n}.json")) for n in MODELS if os.path.exists(f"{OUT}/tiler_{n}.json")]
+    R = [json.load(open(tiler_path(f"{n}.json"))) for n in MODELS if os.path.exists(tiler_path(f"{n}.json"))]
     tables = [table(r) for r in R]
     both = set.intersection(*(set(rel) for _, rel in tables)) if tables else set()   # triples measured on every layer of every model
     rows = [md for md, _ in tables]
@@ -139,7 +144,13 @@ def report():
         best = min(both, key = lambda t: sum(rel[t] for _, rel in tables))
         rows.append(f"### all models\n\nBest single DEFAULT_TILES for {', '.join(r['name'] for r in R)} : {best} (time against the default : " + ", ".join(f"{r['name']} {rel[best]:.2f}" for r, (_, rel) in zip(R, tables)) + ", below 1 is faster)")
     else: rows.append("### all models\n\nNo triple was measured on every layer of every model : use the per-model lines above")
-    md = "\n\n".join(rows); open(f"{OUT}/tiler_table.md", "w").write(md + "\n"); print(md)
+    best = {}
+    for r in R:
+        for S in r["shapes"]:
+            ok = {t: ms for t, ms in S["bf16"].items() if isinstance(ms, float)}
+            if ok: best[(r["BT"], S["V"], S["H"])] = tuple(map(int, min(ok, key = ok.get).split("x")))
+    rows.append("### per layer shape\n\nThe fastest tiles of every layer shape, for `TILES` in src/forge_tpu/kernel/_utils.py :\n\n```python\nTILES = " + repr(best) + "\n```")
+    md = "\n\n".join(rows); open(tiler_path("tiles.md"), "w").write(md + "\n"); print(md)
 
 
 if __name__ == "__main__":

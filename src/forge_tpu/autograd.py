@@ -60,12 +60,14 @@ def _linear_backward(grad_output, x, weight, has_bias, needs_dx, fusedStateObjec
     # This function is for one backward pass, it updates in place unlike Torch which returns dw, and instead of dw we return None.
     # This function takes in (tensor, tensor, tensor, bool, bool, FusedOptimizerState). grad_out we borrow from autograd
     # we have to return in this order only : dx for next layer, dw of this layer (None), db of this layer (if not None else None)
-    go2d = grad_output.reshape(-1, grad_output.shape[-1])                                                                             # go2d is (BT, V) tensor, needed if user uses transformers
-    x2d = x.reshape(-1, x.shape[-1])                                                                                                  # x2d is (BT, H) tensor, needed if user uses transformers
+    go2d = grad_output if grad_output.dim() == 2 else grad_output.reshape(-1, grad_output.shape[-1])                                  # go2d is (BT, V) tensor (transformers gives (B, T, V)). A 2-D tensor : no op at all
+    x2d = x if x.dim() == 2 else x.reshape(-1, x.shape[-1])                                                                           # x2d is (BT, H) tensor
     grad_bias = go2d.sum(0) if has_bias else None                                                                                     # grad_bias is (V) tensor, only if the layer has a bias (FORGE does not update it)
     fusedStateObject.increment_step()                                                                                                 # this layer's update count
-    dx = _bridge.fused_update(go2d.contiguous(), x2d.contiguous(), fusedStateObject, needs_dx)                                        # updates w and its state, returns dx
-    return None if dx is None else dx.reshape(*grad_output.shape[:-1], -1), None, grad_bias                                           # 
+    if not go2d.is_contiguous(): go2d = go2d.contiguous()                                                                             # is_contiguous is a flag read, contiguous() a dispatched op :
+    if not x2d.is_contiguous(): x2d = x2d.contiguous()                                                                                # host time matters here (one FORGE update per Linear per step)
+    dx = _bridge.fused_update(go2d, x2d, fusedStateObject, needs_dx)                                                                  # updates w and its state, returns dx
+    return None if dx is None else dx if grad_output.dim() == 2 else dx.reshape(*grad_output.shape[:-1], -1), None, grad_bias                                           # 
 
 
 

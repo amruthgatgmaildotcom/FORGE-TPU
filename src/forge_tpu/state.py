@@ -44,6 +44,7 @@ class FusedOptimizerState:
         if state_mode is not None and not OPTIMIZERS[optimizer_type].states: raise ValueError(f"{optimizer_type} has no optimizer state, do not give a state_mode")
         state_mode = "bf16" if state_mode is None else state_mode                                                                   # None : bf16 (an optimizer with no state uses no state_mode)
         if state_mode not in ("bf16", "int8"): raise ValueError(f"unknown state_mode {state_mode!r}, use 'bf16' (plain) or 'int8'") #
+        if state_mode not in getattr(OPTIMIZERS[optimizer_type], "modes", ("bf16", "int8")): raise ValueError(f"{optimizer_type} supports state_mode {OPTIMIZERS[optimizer_type].modes}, got {state_mode!r}")
         defaults = OPTIMIZERS[optimizer_type].defaults                                                                              # 
         if hparams.keys() - defaults.keys():                                                                                        # if there exists an unknown param
             raise TypeError(f"unknown {optimizer_type} hyperparameters {sorted(hparams.keys() - defaults.keys())}, expected some of {sorted(defaults)}")

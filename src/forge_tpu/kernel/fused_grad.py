@@ -38,24 +38,25 @@ def  fused_grad(go, x, w, states, scalars, *, optimizer, state_mode, interpret, 
     # optimizer and state_modes are strings, states is a dict(string : dict(jax.Array (rows, cols) dtype))
     opt, codec = _utils.lookup(optimizer, state_mode)                                                                                 # returns classes for strings
     (BT, V), H = go.shape, x.shape[1]                                                                                                 #
-    bv, bh = _utils.pick_tiles(V, H, tiles, codec)                                                                                    # validates and returns grid size, default if None
-    bbt = _utils.pick_bt_tile(BT, tiles)                                                                                              #
-    return pl.pallas_call(                                                                                                            #
-        functools.partial(_kernel, opt = opt, codec = codec, BT = BT),                                                                #
-        grid = (pl.cdiv(V, bv), pl.cdiv(H, bh), pl.cdiv(BT, bbt)),                                                                    # 
-        in_specs = (pl.BlockSpec(scalars.shape, lambda i, j, k: (0,), memory_space = pltpu.SMEM),                                     # for scalars 
+    bv, bh, bbt = _utils.tiles_for(BT, V, H, tiles, codec)                                                                            # validates : given tiles, else the best of this shape (_utils.TILES), else the default
+    upd_w = getattr(opt, "weight", True)                                                                                              # Muon : weight = False, the weight is not changed in backward, so the kernel
+    tile = lambda: pl.BlockSpec((bv, bh), lambda i, j, k: (i, j), memory_space = pltpu.VMEM)                                          # neither reads nor writes it (no W traffic, no W donation, no W rebind)
+    states_spec, states_shape = {n: codec.specs(bv, bh) for n in opt.states}, _utils.like(w if upd_w else x, states)[1]               # blocks and shapes of the states (shape_of x : any array, only the states are used when w is not given)
+    out = pl.pallas_call(                                                                                                             #
+        functools.partial(_kernel, opt = opt, codec = codec, BT = BT, single = BT <= bbt, upd_w = upd_w),                             # single : see _kernel, upd_w : w block in and out or not
+        grid = (pl.cdiv(V, bv), pl.cdiv(H, bh), pl.cdiv(BT, bbt)),                                                                    #
+        in_specs = (pl.BlockSpec(scalars.shape, lambda i, j, k: (0,), memory_space = pltpu.SMEM),                                     # for scalars
                     pl.BlockSpec((bbt, bv), lambda i, j, k: (k, i), memory_space = pltpu.VMEM),                                       # for go block
                     pl.BlockSpec((bbt, bh), lambda i, j, k: (k, j), memory_space = pltpu.VMEM),                                       # for x block
-                    pl.BlockSpec((bv, bh), lambda i, j, k: (i, j), memory_space = pltpu.VMEM),                                        # for w block
-                    {n: codec.specs(bv, bh) for n in opt.states}),                                                                    # for states
-        out_specs = (pl.BlockSpec((bv, bh), lambda i, j, k: (i, j), memory_space = pltpu.VMEM),                                       # for w_new
-                     {n: codec.specs(bv, bh) for n in opt.states}),                                                                   # for states_new
-        out_shape = _utils.like(w, states),                                                                                           #
-        scratch_shapes = [pltpu.VMEM((bv, bh), jnp.float32)],                                                                         # for dw, one scratch_pad per pallas_call
-        input_output_aliases = {3 + i: i for i in range(1 + _utils.count_arrays(states))},                                            # to overwrite w and states in place
+                    *([tile()] if upd_w else []), states_spec),                                                                       # for w block (if it changes), for states
+        out_specs = (tile(), states_spec) if upd_w else states_spec,                                                                  # for w_new, states_new
+        out_shape = (jax.ShapeDtypeStruct(w.shape, w.dtype), states_shape) if upd_w else states_shape,                                #
+        scratch_shapes = [] if BT <= bbt else [pltpu.VMEM((bv, bh), jnp.float32)],                                                    # for dw, only when the token axis has several blocks
+        input_output_aliases = {3 + i: i for i in range(int(upd_w) + _utils.count_arrays(states))},                                  # to overwrite w (if it changes) and states in place
         compiler_params = _utils.compiler_params(("parallel", "parallel", "arbitrary")),                                              # i, j can be done parallely, k must be sequential 0, 1, 2 ...
         interpret = interpret,                                                                                                        #
-    )(scalars, go, x, w, states)                                                                                                      #
+    )(scalars, go, x, *([w] if upd_w else []), states)                                                                                #
+    return out if upd_w else (w, out)                                                                                                 # (w_new, states_new). Muon : w is given back as it came (the caller ignores it)
 
 
 
@@ -63,7 +64,16 @@ def  fused_grad(go, x, w, states, scalars, *, optimizer, state_mode, interpret, 
 
 
 
-def _kernel(scalars_ref, go_ref, x_ref, w_ref, state_refs, w_out, states_out, acc_ref, *, opt, codec, BT):
+def _kernel(scalars_ref, go_ref, x_ref, *refs, opt, codec, BT, single, upd_w):
+    if upd_w: w_ref, state_refs, w_out, states_out, *scratch = refs                                                                   # upd_w False (Muon) : no w block in, no w block out
+    else: (state_refs, states_out, *scratch), w_ref, w_out = refs, None, None                                                         # w_ref, w_out None : the epilogue gives the optimizer w = None
+  # single : the whole token axis is ONE block (BT <= bbt, every benchmark layer but the MLP's). Then go.T @ x goes straight to the update in fp32 vregs :
+  # no fp32 scratch pad, no zero fill, no read-modify-write of it (one (bv, bh) fp32 VMEM pass less per tile)
+    if single:
+        grad = jax.lax.dot_general(go_ref[...], x_ref[...], (((0,), (0,)), ((), ())), preferred_element_type = jnp.float32,
+                                   precision = jax.lax.Precision.HIGHEST if go_ref.dtype == jnp.float32 else None)
+        return _epilogue(opt, codec, scalars_ref, w_ref, state_refs, grad, w_out, states_out)
+    acc_ref, = scratch
     # this is the main kernel function which updates the small (bv, bh) w and state blocks. how data moves from VMEM to VREGS is handled by compiler, we dont have to worry
     # go_ref[...] is (bbt, bv)   :   x_ref[...] is (bbt, bh)   :   w_ref[...] is (bv, bh) #
     k = pl.program_id(2)                                                                                                              #
@@ -89,8 +99,8 @@ def _kernel(scalars_ref, go_ref, x_ref, w_ref, state_refs, w_out, states_out, ac
 
 def _epilogue(opt, codec, scalars_ref, w_ref, state_refs, grad, w_out, states_out):
     st = {state_string: codec.decode(state_refs[state_string], opt.floors.get(state_string)) for state_string in opt.states}
-    w, st = opt.update(w_ref[...].astype(jnp.float32), grad, st, scalars_ref)                                                         # inputs to opt.update are all jax arrays of small tiles
-    w_out[...] = w.astype(w_out.dtype)                                                                                                # NOTE : none of these functions are creating duplicates inside VMEM anywhere
+    w, st = opt.update(None if w_ref is None else w_ref[...].astype(jnp.float32), grad, st, scalars_ref)                                                         # inputs to opt.update are all jax arrays of small tiles
+    if w_out is not None: w_out[...] = w.astype(w_out.dtype)                                                                                              # NOTE : none of these functions are creating duplicates inside VMEM anywhere
     for state_string in opt.states: codec.encode(st[state_string], states_out[state_string])                                          # everything that seems like a copy (astype, decode, update, encode) is on a tile, in VREGs
 
 
