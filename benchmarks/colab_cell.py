@@ -13,7 +13,8 @@ TESTS   = ["adamw"]                                                             
 TRAIN   = {"adamw": ["mlp", "llama", "qwen"], "muon": ["llama", "qwen"]}                    # optimizer : models
 PROFILE = {"adamw": ["llama", "qwen"]}                                                       # optimizer : models
 SEEDS   = {"adamw": [0, 1], "muon": [0]}                                                       # optimizer : seeds. Every first seed runs before any second one
-ENV     = {"SEQ": "512", "MAX_SECONDS": "120"}                                               # see benchmarks/config.py
+SECONDS = {"adamw": "100", "muon": "180"}                                                   # optimizer : MAX_SECONDS of one training run
+ENV     = {"SEQ": "512"}                                                                     # see benchmarks/config.py
 
 QUIET = {"PYTHONWARNINGS": "ignore", "TF_CPP_MIN_LOG_LEVEL": "3", "TPU_STDERR_LOG_LEVEL": "3", "TPU_MIN_LOG_LEVEL": "3", "GLOG_minloglevel": "3", "GRPC_VERBOSITY": "ERROR"}
 NOISE = re.compile(r"^[IW]\d{4} |^WARNING: All log messages|^Successfully renamed PrivateUse1|^Registered Python module|^Device type:|^Initializing TPU|^num_cache|^num_compilations|^peak_compilation|Warning: ")
@@ -50,7 +51,7 @@ try:
         for optim, models in TRAIN.items():
             for seed in SEEDS[optim][i:i + 1]:
                 for model in models:
-                    for method in METHODS[optim]: step(f"train {optim} {model} {method} seed {seed}", "benchmarks/train.py", model, method, env = {"OPTIM": optim, "SEED": str(seed)})
+                    for method in METHODS[optim]: step(f"train {optim} {model} {method} seed {seed}", "benchmarks/train.py", model, method, env = {"OPTIM": optim, "SEED": str(seed), "MAX_SECONDS": SECONDS[optim]})
         if i == 0:                                                                           # the profiles after the first seeds : they matter more than a second seed
             for optim, models in PROFILE.items():
                 for model in models:

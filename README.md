@@ -22,7 +22,7 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 
 All changes are against vanilla PyTorch AdamW on the same TPU, unless the text gives a different reference.
 
-- **Llama-3.1-8B, one device :** FORGE decreases the peak memory by **26%** (66.2 → 48.8 GiB, 17.4 GiB less). With int8 moments, the peak memory decreases by **45%** (36.6 GiB). [More details](#-llama-31-8b-tpu-v5e-8)
+- **Llama-3.1-8B, one device :** FORGE decreases the peak memory by **26%** (66.2 → 48.8 GiB, 17.4 GiB less). With int8 moments, the peak memory decreases by **45%** (36.6 GiB). [More details](#-llama-31-8b-tpu-v5e-8).
 - **Less memory :** FORGE decreases the peak memory on each model.
   - Llama-3.2-1B : **−21%** (11.79 → 9.35 GiB), **−35%** with int8 moments. Against fused AdamW : −9%, −25% with int8 moments.
   - MLP-1.1B : **−23%** (13.91 → 10.67 GiB), **−37%** with int8 moments. Against fused AdamW : −16%, −31% with int8 moments.
@@ -38,7 +38,7 @@ All changes are against vanilla PyTorch AdamW on the same TPU, unless the text g
 
 The largest disadvantage of this work is the small HBM of one TPU v5e chip (16 GiB). FORGE gives the most improvement on large layers and on large models. A 16 GiB chip cannot hold these models.
 
-- **Large layers make FORGE faster.** Against fused AdamW, FORGE decreases the step time by 13% on the MLP-1.1B (large layers, 73% of the chip's peak). On Llama-3.2-1B (smaller layers), it decreases the step time by 6%.
+- **Large layers make FORGE faster.** Against fused AdamW, FORGE decreases the step time by 13% on the MLP-1.1B (large layers, 4096 tokens per step, 73% of the chip's peak). On Llama-3.2-1B (smaller layers, 512 tokens per step), it decreases the step time by 6%.
 - **Large models make FORGE save more memory.** On Llama-3.2-1B, the peak memory decreases by 50% of the weight gradient that FORGE deletes (0.91 of 1.81 GiB). On Llama-3.1-8B (calculated), it decreases by 95% of it (12.4 of 13.0 GiB).
 - **On 16 GiB, a large model must be split.** Llama-3.1-8B needs 8 chips. Each chip then holds only 1/8 of each layer, and the chips must communicate. This makes the step slow (see [Llama-3.1-8B](#-llama-31-8b-tpu-v5e-8)).
 
@@ -46,7 +46,7 @@ On a TPU with more HBM, a large model fits on one chip. There, we expect FORGE t
 
 ## 🦙 Llama-3.1-8B (TPU v5e-8)
 
-Llama-3.1-8B is too large for one 16 GiB chip. Thus it ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up. Thus there is only one configuration : batch 1, sequence 512, one seed. and also there is 30-40 hours of waiting time for v5e-8 on kaggle.
+Llama-3.1-8B is too large for one 16 GiB chip. Thus it ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up, and a Kaggle TPU v5e-8 has a waiting time of 30 to 40 hours. Thus there is only one configuration : batch 1, sequence 512, one seed. The run used an earlier version of this code (the `kaggle/` folder of the `python-old` branch, without the 20 lr-warmup steps).
 
 <div align="center">
 <img src="assets/llama8b_headline.png" width="94%" alt="Llama-3.1-8B : peak memory of one device (calculated) and memory vs. speed">
@@ -80,7 +80,7 @@ Model : `transformers` Llama-3.2-1B (1.24B parameters). Hardware : one TPU v5e c
 **FORGE (bf16) uses less memory and less time than fused AdamW.**
 - Fused AdamW has its peak memory at the end of the backward pass. At that point, all weight gradients are in memory.
 - FORGE keeps no weight gradients. Its peak memory moves to the start of the backward pass. At the end of the backward pass, FORGE holds 2.07 GiB less than fused AdamW.
-- The weight gradient that stays (0.49 GiB) is the gradient of the tied embedding. PyTorch updates the embedding, not FORGE.
+- The weight gradient that stays (0.49 GiB) is the gradient of the tied embedding and of the norms. PyTorch updates them, not FORGE.
 - The memory decrease looks small only because the model is small. At the peak of FORGE, the activations are in memory. On Llama-3.2-1B, the activations are 0.46× the size of the weights. On Llama-3.1-8B, they are 0.09× (calculated). Thus on Llama-3.1-8B, the peak decreases by almost all of the deleted weight gradient (95%). This is almost the maximum decrease that deleting the weight gradient can give.
 
 ## ⚡ Every model
@@ -109,13 +109,13 @@ Model : `transformers` Llama-3.2-1B (1.24B parameters). Hardware : one TPU v5e c
 </div>
 
 **Qwen3-0.6B gets a small improvement only. There are two causes :**
-- **Memory.** For each method, the peak memory is at the start of the backward pass. At that point, the loss over the 151,936-token vocabulary is in memory, and no weight gradient exists yet. FORGE holds 1.05 GiB less at the end of the backward pass, but that is not the peak. Only int8 moments decrease the peak.
-- **Time.** Qwen3-0.6B has 196 small weight matrices. With FORGE, the backward pass takes 44.0 ms more. Of this time, 24.2 ms is Python for the 196 updates. The optimizer step takes 16.5 ms less. Thus the total step time increases.
+- **Memory.** For each method, the peak memory is at the start of the backward pass. At that point, the activations and the logits over the 151,936-token vocabulary are in memory, and no weight gradient exists yet. FORGE holds 1.05 GiB less at the end of the backward pass, but that is not the peak. Thus FORGE (bf16) decreases the peak by only 0.5% against fused AdamW. int8 moments decrease it by 13.5%, because the moments are in memory at the peak and int8 moments are smaller.
+- **Time.** Qwen3-0.6B has 196 small weight matrices. With FORGE, the backward pass takes 44.0 ms more than with fused AdamW, and the 196 updates use 24.2 ms of Python time. The optimizer step takes only 16.5 ms less. Thus the total step time increases by 3.3%.
 - **A larger Qwen3 model.** A larger model has larger weight matrices, and a larger weight gradient. The memory of the loss stays the same. Thus we expect FORGE to give better memory and time on a larger Qwen3 model. A larger Qwen3 does not fit in 16 GiB with vanilla AdamW, thus it is not measured.
 
 ## ⏱️ Where the time goes
 
-Each row is one step, with a sync after each phase (`benchmarks/profiling.py`, median of 20 steps, ms).
+`benchmarks/profiling.py`, seed 0, median of 20 steps, ms. Forward, backward and optimizer step : a sync after each phase. Step, as trained : one sync at the end of the step, as in the benchmark.
 
 | Model | Method | Forward | Backward | **Optimizer step** | Step, as trained |
 |---|---|:--:|:--:|:--:|:--:|
@@ -155,7 +155,7 @@ Muon calculates `B = 0.95 B + G` for each weight. This step is local to each til
 | Llama-3.1-8B, one device (calculated), 8 chips | Muon | 56.38 | 2439.7 |  |
 |  | **FORGE (Muon)** | **46.89** | **2342.0** | **-16.8% memory · -4.0% time** |
 
-On Qwen3-0.6B the memory does not change. The cause is the same as with AdamW : the peak memory is at the start of the backward pass.
+On Qwen3-0.6B the peak memory decreases by only 0.2%. The cause is the same as with AdamW : the peak memory is at the start of the backward pass.
 
 ## 🧠 How it works on TPU
 
@@ -166,4 +166,4 @@ On Qwen3-0.6B the memory does not change. The cause is the same as with AdamW : 
 - **One Pallas kernel** with the grid `(V/b_v, H/b_h, BT/b_bt)`. The MXU adds the gradient of each tile in fp32. Then the optimizer updates the tile.
 - **In place.** The kernel gets `W` and the moments as donated buffers (`input_output_aliases`). Thus it writes the new values into the same HBM. The kernel calculates `dx = ΔY·W` first, with the old `W`.
 - **Optimizers.** AdamW (bf16 or int8 moments), SGD and Muon use the same kernel (`src/forge_tpu/kernel/`). PyTorch's fused AdamW updates the embeddings, the tied head and the norms.
-- **Reproduce.** Paste `benchmarks/colab_cell.py` into one Colab cell (TPU v5e-1). Upload the repository zip. `benchmarks/report.py` writes all tables (`results/summary.md`), all figures (`assets/`) and all numbers of this README from `results/`.
+- **Reproduce.** Paste `benchmarks/colab_cell.py` into one Colab cell (TPU v5e-1). Upload the repository zip. `benchmarks/report.py` writes all tables (`results/summary.md`), all figures (`assets/`) and all numbers of this README from `results/`. The Llama-3.1-8B results come from the `kaggle/` code of the `python-old` branch.

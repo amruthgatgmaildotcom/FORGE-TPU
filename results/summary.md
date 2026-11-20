@@ -4,7 +4,7 @@ Written by `benchmarks/report.py` from the files in `results/`. One TPU v5e chip
 
 ## MLP-1.1B · adamw
 
-1.09B params, 4096 tokens per step, lr 0.0003, 2 seed(s), 20 warmup steps (not timed), up to 300 steps or 120 s.
+1.09B params, 4096 tokens per step, lr 0.0003, 2 seed(s), 20 warmup steps (not timed), up to 300 steps or 100 s.
 
 | Method | Peak (GiB) | Step (ms) | TF/s | MFU | Peak vs. vanilla | Step vs. vanilla | Peak vs. best torch | Step vs. best torch | Final loss |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -28,7 +28,7 @@ Every seed :
 
 ## Llama-3.2-1B · adamw
 
-1.24B params, 512 tokens per step, lr 0.0001, 2 seed(s), 20 warmup steps (not timed), up to 300 steps or 120 s.
+1.24B params, 512 tokens per step, lr 0.0001, 2 seed(s), 20 warmup steps (not timed), up to 300 steps or 100 s.
 
 | Method | Peak (GiB) | Step (ms) | TF/s | MFU | Peak vs. vanilla | Step vs. vanilla | Peak vs. best torch | Step vs. best torch | Final loss |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -61,7 +61,7 @@ Where the time of one step goes (`profiling.py`, median of 20 steps, ms) :
 
 ## Qwen3-0.6B · adamw
 
-0.60B params, 512 tokens per step, lr 0.0001, 2 seed(s), 20 warmup steps (not timed), up to 300 steps or 120 s.
+0.60B params, 512 tokens per step, lr 0.0001, 2 seed(s), 20 warmup steps (not timed), up to 300 steps or 100 s.
 
 | Method | Peak (GiB) | Step (ms) | TF/s | MFU | Peak vs. vanilla | Step vs. vanilla | Peak vs. best torch | Step vs. best torch | Final loss |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|

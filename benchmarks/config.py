@@ -6,7 +6,7 @@ import os
 #        OPTIM        adamw | sgd | muon                 (default adamw)
 #        SEED         the seed of the model init and of the data, the same for every method of a run      (default 0)
 #        SEQ          tokens per sequence of Llama and Qwen, batch 1 (the MLP always has 4096 tokens per step)   (default 512)
-#        MAX_SECONDS  a training run stops after MAX_STEPS steps or after MAX_SECONDS seconds, whatever comes first   (default 120)
+#        MAX_SECONDS  a training run stops after MAX_STEPS steps or after MAX_SECONDS seconds, whatever comes first   (default 100)
 #     Every file the benchmarks write (and nothing else) :
 #        results/<optim>/<model>/<method>_seed<N>.json     train.py       one training run : the loss, time and memory of every step, and the summary numbers
 #        results/<optim>/<model>/profile_<method>.json     profiling.py   where the time of one step goes
@@ -47,7 +47,7 @@ OPTIM = os.environ.get("OPTIM", "adamw").lower()
 if OPTIM not in METHODS: raise SystemExit(f"OPTIM={OPTIM!r} : unknown optimizer, use one of {sorted(METHODS)}")
 SEED = int(os.environ.get("SEED", 0))
 SEQ = int(os.environ.get("SEQ", 512))
-MAX_SECONDS = float(os.environ.get("MAX_SECONDS", 120))
+MAX_SECONDS = float(os.environ.get("MAX_SECONDS", 100))
 
 def run_path(optim, model, method, seed): return os.path.join(RESULTS, optim, model, f"{method}_seed{seed}.json")
 def profile_path(optim, model, method):   return os.path.join(RESULTS, optim, model, f"profile_{method}.json")

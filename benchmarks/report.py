@@ -9,7 +9,6 @@ SEQ_8B = 512                                                                    
 #     method : the numbers are the mean over the seeds, "±" is half the gap between the seeds, the losses are the per-step mean (the band in the plots : min to max).
 #        assets/forge_tiling.png                 the kernel, drawn (no data)
 #        assets/<model>_headline.png             AdamW : peak memory, split in weights / optimizer states / activations / weight gradient, and memory vs. speed
-#        assets/llama_muon_headline.png          the same for Muon on Llama-3.2-1B
 #        assets/llama8b_headline.png             the same for Llama-3.1-8B on 8 chips, memory of one device (calculated)
 #        assets/glance.png                       every model at once against vanilla AdamW : memory saved, speed-up
 #        assets/convergence.gif                  Llama-3.2-1B, the losses step by step
@@ -305,6 +304,7 @@ def values():
         for m, r in D[key].items(): V[f"{key}.{m}.saved"] = ref["peak"] - r["peak"]
     # derived
     V["seq_8b"] = SEQ_8B
+    V["k_1dev"] = json.load(open(kaggle_path("adamw", SEQ_8B, "forge_bf16")))["one_device"]["K"]       # the activation factor of the one-device calculation
     V["qwen.bwd_end_saved"] = held("adamw", "qwen", "adamw_fused", "backward") - held("adamw", "qwen", "forge_bf16", "backward")
     V["qwen.bwd_extra"] = V["prof.qwen.forge_bf16.bwd"] - V["prof.qwen.adamw_fused.bwd"]
     V["qwen.opt_saved"] = V["prof.qwen.adamw_fused.opt"] - V["prof.qwen.forge_bf16.opt"]
@@ -316,6 +316,7 @@ def values():
         f, g = R["adamw_fused"], R["forge_bf16"]
         V[f"pool.{key}"], V[f"pool_saved.{key}"] = f["grads"] - g["grads"], f["peak"] - g["peak"]
         V[f"pool_pct.{key}"], V[f"act_per_weight.{key}"] = (f["peak"] - g["peak"]) / (f["grads"] - g["grads"]) * 100, f["activations"] / f["weights"]
+    V["qwen.forge_bf16_slower"] = -D["adamw"]["qwen"]["forge_bf16"]["dstep_best"]
     V["llama.int8_slower_best"] = -D["adamw"]["llama"]["forge_int8"]["dstep_best"]
     V["llama.int8_more_saved"] = D["adamw"]["llama"]["forge_bf16"]["peak"] - D["adamw"]["llama"]["forge_int8"]["peak"]
     gaps = {k: (abs(D["adamw"][k]["forge_bf16"]["loss"] - D["adamw"][k]["adamw"]["loss"]), abs(D["adamw"][k]["adamw_fused"]["loss"] - D["adamw"][k]["adamw"]["loss"])) for k in D["adamw"]}
@@ -338,6 +339,7 @@ def claims(V, D, gaps, fails):
     return [(a["llama"]["forge_bf16"]["step_ms"] < a["llama"]["adamw_fused"]["step_ms"] and a["llama"]["forge_bf16"]["peak"] < a["llama"]["adamw_fused"]["peak"], "Llama-3.2-1B : FORGE (bf16) is faster AND smaller than fused AdamW"),
             (a["mlp"]["forge_bf16"]["step_ms"] < a["mlp"]["adamw_fused"]["step_ms"] and a["mlp"]["forge_int8"]["step_ms"] < a["mlp"]["adamw_fused"]["step_ms"], "MLP : both FORGE arms are faster than fused AdamW"),
             (peak_phase("adamw", "llama", "adamw_fused") == "end of backward" and peak_phase("adamw", "llama", "forge_bf16") == "start of backward", "Llama-3.2-1B : fused AdamW peaks at the end of backward, FORGE at the start of backward"),
+            (D["adamw"]["qwen"]["forge_int8"]["dmem_best"] > D["adamw"]["qwen"]["forge_bf16"]["dmem_best"] > 0, "Qwen3-0.6B : bf16 lowers the peak a little, int8 more"),
             (all(peak_phase(o, "qwen", x) == "start of backward" for o, x in (("adamw", "adamw_fused"), ("adamw", "forge_bf16"), ("muon", "muon"), ("muon", "forge_muon"))), "Qwen3-0.6B : every method peaks at the start of backward"),
             (V["qwen.bwd_extra"] > V["qwen.opt_saved"], "Qwen3-0.6B : FORGE's longer backward costs more than its shorter optimizer step saves"),
             (a["qwen"]["forge_bf16"]["step_ms"] > a["qwen"]["adamw_fused"]["step_ms"], "Qwen3-0.6B : FORGE (bf16) is slower than fused AdamW"),
@@ -472,8 +474,6 @@ def main():
     if rows: glance(rows, os.path.join(ASSETS, "glance.png"))
     R = big("adamw")
     if len(R) > 1: headline(R, "adamw", os.path.join(ASSETS, "llama8b_headline.png"), "(a) Llama-3.1-8B : one device (calculated)")
-    R = load("muon", "llama")
-    if len(R) > 1: headline(R, "muon", os.path.join(ASSETS, "llama_muon_headline.png"), "(a) Llama-3.2-1B, Muon : peak memory")
     summary()
     V, D, gaps, fails = values()
     wrong = [c for ok, c in claims(V, D, gaps, fails) if not ok]
