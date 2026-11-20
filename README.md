@@ -20,8 +20,13 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 
 ## ✨ Highlights
 
-Each change is against vanilla PyTorch AdamW, then against fused AdamW, on the same TPU.
+Each number below is against vanilla PyTorch AdamW, then against fused AdamW, on the same TPU.
 
+- **A new FORGE for TPU, written from the start in Pallas, on a stack with almost no documentation (`torch_tpu` 0.3).**
+  - **In place : `W` and the moments go to the kernel as donated HBM buffers. A check on the first launch warns if XLA copies them.**
+  - **Fast launch : the first launch of each layer shape is caught inside `torch_tpu` and replayed. The replay skips about 160 µs of checks for each layer (the launch itself takes about 21 µs).**
+  - **int8 moments (one fp32 scale for each 64 rows), SGD and Muon, in the same kernel.**
+  - **Llama-3.1-8B on 8 chips : new tensor-parallel layers and a distributed Newton–Schulz for Muon. A check of a small Llama, 8 chips against one chip, passes for 6 of 6 methods.**
 - **Llama-3.1-8B, one device :** the peak memory decreases by **26%** (66.2 → 48.8 GiB) and by **45%** with int8 moments. Against fused AdamW : −20%, −40% with int8 moments. [More details](#-llama-31-8b-tpu-v5e-8).
 - **Less memory :** FORGE decreases the peak memory on each model.
   - Llama-3.2-1B : **−21%** (11.79 → 9.35 GiB), **−35%** with int8 moments. Against fused AdamW : −9%, −25%.

@@ -303,6 +303,8 @@ def values():
         ref = D[key].get(REF["adamw" if key == "8b" else "muon"])
         for m, r in D[key].items(): V[f"{key}.{m}.saved"] = ref["peak"] - r["peak"]
     # derived
+    smoke = [l for o in ("adamw", "muon") for l in open(os.path.join(RESULTS, "kaggle_v5e8", o, "smoke.md")).read().splitlines() if l.startswith("| Llama")]
+    V["smoke.methods"], V["smoke.pass"] = len(smoke), sum(l.rstrip().endswith("| PASS |") for l in smoke)
     V["seq_8b"] = D["8b"]["forge_bf16"]["settings"]["seq"]
     V["k_1dev"] = json.load(open(kaggle_path("adamw", "forge_bf16")))["one_device"]["K"]               # the activation factor of the one-device calculation
     V["qwen.bwd_end_saved"] = held("adamw", "qwen", "adamw_fused", "backward") - held("adamw", "qwen", "forge_bf16", "backward")
@@ -352,6 +354,7 @@ def claims(V, D, gaps, fails):
             (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db"),
             (all(r["dmem"] > 0 for k in a for x, r in a[k].items() if x.startswith("forge")) and all(r["dmem"] > 0 for k in m for x, r in m[k].items() if x.startswith("forge")), "every model : FORGE has less peak memory than vanilla torch"),
             (all(a[k][x]["dstep"] > 0 for k in a for x in ("forge_bf16", "forge_int8")) and all(a[k]["forge_bf16"]["dstep_best"] > 0 for k in a if k != "qwen"), "one chip : FORGE is faster than vanilla AdamW on each model, and faster than fused AdamW except on Qwen3-0.6B"),
+            (V["smoke.pass"] == V["smoke.methods"] > 0, "8 chips : every method agrees with one chip (smoke.md)"),
             (D["8b"]["forge_bf16"]["mfu"] < 10, "Llama-3.1-8B : the 8 chips reach less than 10% of their peak"),
             ([D["8b"][x]["settings"]["warmup"] for x in D["8b"]] == [10] * len(D["8b"]) and all(D["8b"][x]["settings"]["lr_warmup"] == 0 and D["8b"][x]["steps"] == 200 for x in D["8b"]), "Llama-3.1-8B : 200 steps, 10 not timed, no lr warmup"),
             (V["pool_pct.8b"] > V["pool_pct.1b"] and V["act_per_weight.8b"] < V["act_per_weight.1b"], "a larger model : more of the deleted gradient pool leaves the peak, activations are smaller next to the weights"),
