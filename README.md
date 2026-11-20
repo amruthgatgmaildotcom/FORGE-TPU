@@ -22,7 +22,7 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 
 All changes are against vanilla PyTorch AdamW on the same TPU, unless the text gives a different reference.
 
-- **Llama-3.1-8B, one device :** FORGE decreases the peak memory by **26%** (66.2 → 48.8 GiB, 17.4 GiB less). With int8 moments, the peak memory decreases by **45%** (36.6 GiB). [The memory is calculated from a run on a Kaggle TPU v5e-8](#-llama-31-8b-tpu-v5e-8).
+- **Llama-3.1-8B, one device :** FORGE decreases the peak memory by **26%** (66.2 → 48.8 GiB, 17.4 GiB less). With int8 moments, the peak memory decreases by **45%** (36.6 GiB). [More details](#-llama-31-8b-tpu-v5e-8)
 - **Less memory :** FORGE decreases the peak memory on each model.
   - Llama-3.2-1B : **−21%** (11.79 → 9.35 GiB), **−35%** with int8 moments. Against fused AdamW : −9%, −25% with int8 moments.
   - MLP-1.1B : **−23%** (13.91 → 10.67 GiB), **−37%** with int8 moments. Against fused AdamW : −16%, −31% with int8 moments.
@@ -46,7 +46,7 @@ On a TPU with more HBM, a large model fits on one chip. There, we expect FORGE t
 
 ## 🦙 Llama-3.1-8B (TPU v5e-8)
 
-Llama-3.1-8B is too large for one 16 GiB chip. Thus it ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up. Thus there is only one configuration : batch 1, sequence 512, one seed.
+Llama-3.1-8B is too large for one 16 GiB chip. Thus it ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up. Thus there is only one configuration : batch 1, sequence 512, one seed. and also there is 30-40 hours of waiting time for v5e-8 on kaggle.
 
 <div align="center">
 <img src="assets/llama8b_headline.png" width="94%" alt="Llama-3.1-8B : peak memory of one device (calculated) and memory vs. speed">
