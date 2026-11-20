@@ -13,6 +13,9 @@ import os
 #        results/<optim>/tests.md                          tests.py       FORGE against PyTorch, every check
 #        results/tiler/<model>.json, results/tiler/tiles.md   tiler.py    the fastest kernel tiles of every layer shape
 #        results/summary.md, assets/*                      report.py      the tables and the figures, made from the files above only
+#     and one more folder, written by the Kaggle run of Llama-3.1-8B on a TPU v5e-8 (8 chips, tensor parallel; its code is kaggle/ on the python-old branch) :
+#        results/kaggle_v5e8/<optim>/llama8b_seq<S>/llama8b_seq<S>_<method>.json        measured, memory of ONE chip
+#        results/kaggle_v5e8/<optim>/llama8b_seq<S>/llama8b_seq<S>_<method>_1dev.json   the same run, memory CALCULATED for one device (see report.py, big)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS, ASSETS = os.path.join(ROOT, "results"), os.path.join(ROOT, "assets")
@@ -49,4 +52,5 @@ MAX_SECONDS = float(os.environ.get("MAX_SECONDS", 120))
 def run_path(optim, model, method, seed): return os.path.join(RESULTS, optim, model, f"{method}_seed{seed}.json")
 def profile_path(optim, model, method):   return os.path.join(RESULTS, optim, model, f"profile_{method}.json")
 def tests_path(optim):                    return os.path.join(RESULTS, optim, "tests.md")
+def kaggle_path(optim, seq, method, one_device = True): return os.path.join(RESULTS, "kaggle_v5e8", optim, f"llama8b_seq{seq}", f"llama8b_seq{seq}_{method}" + ("_1dev" if one_device else "") + ".json")
 def tiler_path(name):                     return os.path.join(RESULTS, "tiler", name)

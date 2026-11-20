@@ -1,6 +1,6 @@
 import glob, json, os, re, shutil, statistics, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import METHODS, BEST, LABELS, MODELS, RESULTS, ASSETS, run_path, profile_path, tests_path
+from config import METHODS, BEST, LABELS, MODELS, RESULTS, ASSETS, run_path, profile_path, tests_path, kaggle_path
 
 #   Readme.md
 #     python benchmarks/report.py   ->   results/summary.md (every table) and assets/ (every figure). Plain Python + matplotlib : no torch, no TPU, run it anywhere.
@@ -11,6 +11,7 @@ from config import METHODS, BEST, LABELS, MODELS, RESULTS, ASSETS, run_path, pro
 #        assets/<model>_muon_headline.png        the same for Muon
 #        assets/glance.png                       every model at once against vanilla AdamW : memory saved, speed-up
 #        assets/<model>_parity.png, assets/<model>_muon_parity.png, assets/convergence.gif     the losses, step by step
+#        assets/llama8b_headline.png, assets/llama8b_muon_headline.png, assets/llama8b_parity.png    Llama-3.1-8B on 8 chips (results/kaggle_v5e8), memory of ONE device, calculated
 PEAK_TFLOPS = 197.0                                                                          # TPU v5e, bf16, one chip
 REF = {o: m[0] for o, m in METHODS.items()}                                                  # vanilla torch : the reference
 ORDER = METHODS
@@ -47,6 +48,18 @@ def combine(seeds):
                 lo = [min(r["loss"][i] for r in seeds) for i in range(n)], hi = [max(r["loss"][i] for r in seeds) for i in range(n)])
 
 def load(optim, model): return {m: combine(s) for m, s in runs(optim, model).items()}
+
+def big(optim, seq):
+    # Llama-3.1-8B, tensor parallel over 8 TPU v5e chips (one run, seed 0) : step time and loss as measured, memory of ONE device as CALCULATED by the Kaggle run from the
+    # memory of one chip : weights, optimizer states and weight gradient x 8 (each chip holds exactly 1/8 of them), activations x 2.636 (most activations are the same
+    # on every chip; the factor is the ratio of one-device to one-chip activations of the same model and data, from a one-device run on another accelerator). "chip" : measured
+    out = {}
+    for m in METHODS[optim]:
+        if not os.path.exists(kaggle_path(optim, seq, m)): continue
+        r, c = json.load(open(kaggle_path(optim, seq, m))), json.load(open(kaggle_path(optim, seq, m, False)))
+        out[m] = dict(params = r["params"], seeds = 1, steps = r["steps"], warmup = 10, chip_peak = c["peak"], chips = c["chips"], losses = r["losses"],
+                      **{k: r[k] for k in ("peak", "weights", "states", "grads", "activations", "step_ms", "step_std", "tflops")}, spread = 0.0)
+    return out
 
 def profiles(optim, model):
     return {m: json.load(open(profile_path(optim, model, m))) for m in METHODS[optim] if os.path.exists(profile_path(optim, model, m))}
@@ -308,6 +321,19 @@ def summary():
             head = open(tests_path(optim)).readline().strip("# \n")
             fails = [(c, " | ".join(k)) for c, *k, _, _, _ in (l.strip().strip("|").split(" | ") for l in open(tests_path(optim)) if "**FAIL**" in l)]
             out += [f"## Correctness · {optim}", "", f"{head} ([tests.md]({os.path.relpath(tests_path(optim), RESULTS)})). Fails : " + ("; ".join(f"{c.strip()} : {k.strip()}" for c, k in fails) or "none"), ""]
+    for optim in ("adamw", "muon"):
+        for seq in (512, 1024):
+            R = big(optim, seq)
+            if not R: continue
+            ref, best = R.get(REF[optim]), R.get(BEST[optim])
+            out += [f"## Llama-3.1-8B · {optim} · sequence {seq} · TPU v5e-8", "", f"8 chips, tensor parallel, batch 1, one seed; step time : median of {next(iter(R.values()))['steps'] - 10} steps. "
+                    "Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).", "",
+                    "| Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |", "|---|" + ":--:|" * 13]
+            for m, r in R.items():
+                cmp = lambda b, k: "—" if b is None or b is r else (f"{-pct(r[k], b[k]):+.1f}%" if k == "peak" else f"{x_(r[k], b[k]):.2f}×")
+                out.append(f"| {LABELS[m]} | {r['chip_peak']:.2f} | {r['peak']:.2f} | {r['weights']:.2f} | {r['states']:.2f} | {r['grads']:.2f} | {r['activations']:.2f} | {r['step_ms']:.1f} ± {r['step_std']:.1f} | "
+                           f"{r['tflops']:.0f} | {cmp(ref, 'peak')} | {cmp(best, 'peak')} | {cmp(ref, 'step_ms')} | {cmp(best, 'step_ms')} |")
+            out.append("")
     path = os.path.join(RESULTS, "summary.md"); open(path, "w").write("\n".join(out)); print(f"wrote {path}")
 
 
@@ -334,6 +360,12 @@ def main():
             headline(R, "muon", os.path.join(ASSETS, f"{model}_muon_headline.png"), f"(a) {title}, Muon : peak memory")
             parity(R, "muon", f"{title} (Muon, one TPU v5e)", os.path.join(ASSETS, f"{model}_muon_parity.png"))
     if rows: glance(rows, os.path.join(ASSETS, "glance.png"))
+    R = big("adamw", 512)
+    if len(R) > 1:
+        headline(R, "adamw", os.path.join(ASSETS, "llama8b_headline.png"), "(a) Llama-3.1-8B : one device")
+        parity(R, "adamw", "Llama-3.1-8B (AdamW, TPU v5e-8, sequence 512)", os.path.join(ASSETS, "llama8b_parity.png"))
+    R = big("muon", 512)
+    if len(R) > 1: headline(R, "muon", os.path.join(ASSETS, "llama8b_muon_headline.png"), "(a) Llama-3.1-8B, Muon : one device")
     summary()
     print("assets :", " ".join(sorted(os.listdir(ASSETS))))
 
