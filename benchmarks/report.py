@@ -10,6 +10,7 @@ SEQ_8B = 512                                                                    
 #        assets/forge_tiling.png                 the kernel, drawn (no data)
 #        assets/<model>_headline.png             AdamW : peak memory, split in weights / optimizer states / activations / weight gradient, and memory vs. speed
 #        assets/llama_muon_headline.png          the same for Muon on Llama-3.2-1B
+#        assets/llama8b_headline.png             the same for Llama-3.1-8B on 8 chips, memory of one device (calculated)
 #        assets/glance.png                       every model at once against vanilla AdamW : memory saved, speed-up
 #        assets/convergence.gif                  Llama-3.2-1B, the losses step by step
 #     README.md : benchmarks/README.template.md with every {{key}} (or {{key:format}}) replaced by a number of this file (values()), and every claim of the text
@@ -311,6 +312,10 @@ def values():
     V["llama.peak_below_fused"] = held("adamw", "llama", "adamw_fused", "backward") - held("adamw", "llama", "forge_bf16", "backward")
     V["vocab.qwen"] = 151936
     V["llama.opt_cut"] = pct(V["prof.llama.forge_bf16.opt"], V["prof.llama.adamw.opt"]); V["llama.opt_cut_best"] = pct(V["prof.llama.forge_bf16.opt"], V["prof.llama.adamw_fused.opt"])
+    for key, R in (("1b", D["adamw"]["llama"]), ("8b", D["8b"])):                         # how much of the deleted gradient pool leaves the peak : small model against large model
+        f, g = R["adamw_fused"], R["forge_bf16"]
+        V[f"pool.{key}"], V[f"pool_saved.{key}"] = f["grads"] - g["grads"], f["peak"] - g["peak"]
+        V[f"pool_pct.{key}"], V[f"act_per_weight.{key}"] = (f["peak"] - g["peak"]) / (f["grads"] - g["grads"]) * 100, f["activations"] / f["weights"]
     V["llama.int8_slower_best"] = -D["adamw"]["llama"]["forge_int8"]["dstep_best"]
     V["llama.int8_more_saved"] = D["adamw"]["llama"]["forge_bf16"]["peak"] - D["adamw"]["llama"]["forge_int8"]["peak"]
     gaps = {k: (abs(D["adamw"][k]["forge_bf16"]["loss"] - D["adamw"][k]["adamw"]["loss"]), abs(D["adamw"][k]["adamw_fused"]["loss"] - D["adamw"][k]["adamw"]["loss"])) for k in D["adamw"]}
@@ -342,7 +347,9 @@ def claims(V, D, gaps, fails):
             (max(b8[x]["step_ms"] for x in ("forge_bf16", "forge_int8")) < min(b8[x]["step_ms"] for x in ("adamw", "adamw_fused")), "Llama-3.1-8B : both FORGE arms are faster than both torch methods"),
             (m["llama"]["forge_muon"]["peak"] < m["llama"]["muon"]["peak"] and m["llama"]["forge_muon"]["step_ms"] < m["llama"]["muon"]["step_ms"], "Llama-3.2-1B : FORGE (Muon) is faster AND smaller than Muon"),
             (all(g <= f + 1e-4 for g, f in gaps.values()), "every model : the FORGE (bf16) final loss is never further from vanilla AdamW than fused AdamW's"),
-            (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db")]
+            (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db"),
+            (V["pool_pct.8b"] > V["pool_pct.1b"] and V["act_per_weight.8b"] < V["act_per_weight.1b"], "a larger model : more of the deleted gradient pool leaves the peak, activations are smaller next to the weights"),
+            (a["mlp"]["forge_bf16"]["dstep_best"] > a["llama"]["forge_bf16"]["dstep_best"], "larger layers : a larger speed-up against fused AdamW (MLP against Llama-3.2-1B)")]
 
 
 
@@ -461,6 +468,8 @@ def main():
                              "speed": {c: x_(R[m]["step_ms"], R["adamw"]["step_ms"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R}}))
         if model == "llama": gif(R, "adamw", f"{title}, one TPU v5e chip", os.path.join(ASSETS, "convergence.gif"))
     if rows: glance(rows, os.path.join(ASSETS, "glance.png"))
+    R = big("adamw")
+    if len(R) > 1: headline(R, "adamw", os.path.join(ASSETS, "llama8b_headline.png"), "(a) Llama-3.1-8B : one device (calculated)")
     R = load("muon", "llama")
     if len(R) > 1: headline(R, "muon", os.path.join(ASSETS, "llama_muon_headline.png"), "(a) Llama-3.2-1B, Muon : peak memory")
     summary()
