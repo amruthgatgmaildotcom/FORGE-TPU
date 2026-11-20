@@ -1,6 +1,6 @@
 import torch, torch.nn as nn
 from forge_tpu import FusedLinear, Muon, MuonStep, Steps
-from config import OPTIM, WARMUP
+from config import OPTIM, LR_WARMUP
 
 #   Readme.md
 #     How each method trains : which weights FORGE takes (fuse), which torch optimizer takes the rest (make_optimizer), and the lr warmup (lr_warmup).
@@ -51,10 +51,10 @@ def make_optimizer(method, model, scope, lr, wd, muon = Muon, muon_step = MuonSt
 
 
 def lr_warmup(model, opt):
-    # returns set_lr(step) : every lr of the method (its torch param groups and every FORGE layer) = its base lr x min(1, (step + 1) / WARMUP). The same for every method.
-    # A random-init model at the full lr from step 0 makes loss spikes. FORGE reads its lr as runtime data (no recompile), and the WARMUP steps are not timed
+    # returns set_lr(step) : every lr of the method (its torch param groups and every FORGE layer) = its base lr x min(1, (step + 1) / LR_WARMUP). The same for every method.
+    # A random-init model at the full lr from step 0 makes loss spikes. FORGE reads its lr as runtime data (no recompile). LR_WARMUP = 0 : the base lr from step 0
     targets = [(d, d["lr"]) for d in (opt.param_groups if opt else []) + [m.fusedStateObject.hparams for m in model.modules() if isinstance(m, FusedLinear)]]
     def set_lr(step):
-        if step > WARMUP: return
-        for d, base in targets: d["lr"] = base * min(1.0, (step + 1) / WARMUP)
+        if step > LR_WARMUP or LR_WARMUP == 0: return
+        for d, base in targets: d["lr"] = base * min(1.0, (step + 1) / LR_WARMUP)
     return set_lr

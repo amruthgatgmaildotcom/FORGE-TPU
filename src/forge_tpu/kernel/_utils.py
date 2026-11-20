@@ -54,7 +54,7 @@ def _check(name, block, dim, multiple):
 
 
 TILES = {  # {(BT, V, H): (bv, bh, bbt)} : the tiles of one layer shape, DEFAULT_TILES for every other shape (benchmarks/tiler.py prints this dict from measured times)
-    # Llama-3.1-8B on 8 chips (kaggle/tp.py), the layer shapes of one chip. NOT measured yet : chosen with an HBM traffic + pipeline model (12 B/param moved, x re-read once per row
+    # Llama-3.1-8B on 8 chips (benchmarks/kaggle/tp.py), the layer shapes of one chip. NOT measured yet : chosen with an HBM traffic + pipeline model (12 B/param moved, x re-read once per row
     # block, go once per column block, the first load and the last store not hidden, 0.35 us per grid step). The gain : gate / up (V = 1792) are one row block, the default bv = 512
     # gave a half-empty last block (1/8 of the traffic wasted); q and k / v get more, smaller column blocks, so the pipeline hides more of the loads. Same results as the default tiles.
     (512, 512, 4096): (512, 512, 512),    (512, 128, 4096): (128, 1024, 512),    (512, 1792, 4096): (1792, 512, 512)}

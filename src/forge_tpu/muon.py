@@ -14,7 +14,7 @@ from forge_tpu.module import FusedLinear
 #          1.  the math              |   newton_schulz, scale, muon_update (one matrix)
 #          2.  the two optimizers    |   apply_muon (all matrices), MuonStep (FORGE Muon), Muon (standard Muon, the baseline)
 #          3.  Steps                 |   several optimizers of one model as one object
-#     kaggle/tp.py replaces apply_muon (the apply argument) with a tensor-parallel version, nothing else changes
+#     benchmarks/kaggle/tp.py replaces apply_muon (the apply argument) with a tensor-parallel version, nothing else changes
 
 NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)                                                                                           # (a, b, c) of the quintic Newton-Schulz step (Keller Jordan's Muon)
 

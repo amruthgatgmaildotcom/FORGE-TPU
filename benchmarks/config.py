@@ -6,19 +6,22 @@ import os
 #        OPTIM        adamw | sgd | muon                 (default adamw)
 #        SEED         the seed of the model init and of the data, the same for every method of a run      (default 0)
 #        SEQ          tokens per sequence of Llama and Qwen, batch 1 (the MLP always has 4096 tokens per step)   (default 512)
-#        MAX_SECONDS  a training run stops after MAX_STEPS steps or after MAX_SECONDS seconds, whatever comes first   (default 100)
+#        MAX_STEPS, MAX_SECONDS   a training run stops after MAX_STEPS steps or after MAX_SECONDS seconds, whatever comes first   (default 300, 100)
+#        WARMUP       the first WARMUP steps are not timed   (default 20)
+#        LR_WARMUP    the lr goes up linearly over the first LR_WARMUP steps, the same for every method; 0 : no lr warmup   (default WARMUP)
+#        RESULTS      the results folder   (default results/ of the repo; benchmarks/kaggle/ gives results/kaggle_v5e8)
 #     Every file the benchmarks write (and nothing else) :
 #        results/<optim>/<model>/<method>_seed<N>.json     train.py       one training run : the loss, time and memory of every step, and the summary numbers
 #        results/<optim>/<model>/profile_<method>.json     profiling.py   where the time of one step goes
 #        results/<optim>/tests.md                          tests.py       FORGE against PyTorch, every check
 #        results/tiler/<model>.json, results/tiler/tiles.md   tiler.py    the fastest kernel tiles of every layer shape
 #        results/summary.md, assets/*                      report.py      the tables and the figures, made from the files above only
-#     and one more folder, written by the Kaggle run of Llama-3.1-8B on a TPU v5e-8 (8 chips, tensor parallel; its code is kaggle/ on the python-old branch) :
-#        results/kaggle_v5e8/<optim>/llama8b_seq<S>/llama8b_seq<S>_<method>.json        measured, memory of ONE chip
-#        results/kaggle_v5e8/<optim>/llama8b_seq<S>/llama8b_seq<S>_<method>_1dev.json   the same run, memory CALCULATED for one device (see report.py, big)
+#     Llama-3.1-8B on a TPU v5e-8 (8 chips, tensor parallel, benchmarks/kaggle/) writes the same files into results/kaggle_v5e8/, and two more :
+#        results/kaggle_v5e8/<optim>/smoke.md                              kaggle/run.py smoke    the 8-chip checks
+#        results/kaggle_v5e8/<optim>/llama8b/<method>_seed<N>_1dev.json    kaggle/one_device.py   the same run, memory CALCULATED for one device
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS, ASSETS = os.path.join(ROOT, "results"), os.path.join(ROOT, "assets")
+RESULTS, ASSETS = os.environ.get("RESULTS", os.path.join(ROOT, "results")), os.path.join(ROOT, "assets")
 
 
 
@@ -35,7 +38,6 @@ LABELS = {"adamw": "vanilla AdamW", "adamw_fused": "fused AdamW", "forge_bf16": 
           "muon": "Muon", "forge_muon": "FORGE (Muon)"}
 MODELS = {"mlp": "MLP-1.1B", "llama": "Llama-3.2-1B", "qwen": "Qwen3-0.6B"}                  # benchmarks/<model>.py
 
-MAX_STEPS, WARMUP = 300, 20                                                                  # WARMUP : the lr goes up linearly over the first WARMUP steps, and they are not timed
 
 
 
@@ -47,10 +49,12 @@ OPTIM = os.environ.get("OPTIM", "adamw").lower()
 if OPTIM not in METHODS: raise SystemExit(f"OPTIM={OPTIM!r} : unknown optimizer, use one of {sorted(METHODS)}")
 SEED = int(os.environ.get("SEED", 0))
 SEQ = int(os.environ.get("SEQ", 512))
+MAX_STEPS = int(os.environ.get("MAX_STEPS", 300))
 MAX_SECONDS = float(os.environ.get("MAX_SECONDS", 100))
+WARMUP = int(os.environ.get("WARMUP", 20))
+LR_WARMUP = int(os.environ.get("LR_WARMUP", WARMUP))
 
 def run_path(optim, model, method, seed): return os.path.join(RESULTS, optim, model, f"{method}_seed{seed}.json")
 def profile_path(optim, model, method):   return os.path.join(RESULTS, optim, model, f"profile_{method}.json")
 def tests_path(optim):                    return os.path.join(RESULTS, optim, "tests.md")
-def kaggle_path(optim, seq, method, one_device = True): return os.path.join(RESULTS, "kaggle_v5e8", optim, f"llama8b_seq{seq}", f"llama8b_seq{seq}_{method}" + ("_1dev" if one_device else "") + ".json")
 def tiler_path(name):                     return os.path.join(RESULTS, "tiler", name)

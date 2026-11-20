@@ -128,9 +128,9 @@ Every seed :
 | Muon | 0 | 157 | 5.056 | 1.110 | 1.400 | 1.110 | 1.435 | 1057.6 ± 87.1 | 1.9 | 0.4212 |
 | FORGE (Muon) | 0 | 164 | 5.044 | 1.110 | 1.400 | 0.290 | 2.244 | 1006.9 ± 64.9 | 2.0 | 0.4470 |
 
-## Llama-3.1-8B · adamw · sequence 512 · TPU v5e-8
+## Llama-3.1-8B · adamw · TPU v5e-8
 
-8 chips, tensor parallel, batch 1, one seed; step time : median of 190 steps. Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).
+8 chips, tensor parallel (benchmarks/kaggle/), batch 1, sequence 512, one seed; step time : median of 190 steps (the first 10 not timed, lr warmup 0). Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; benchmarks/kaggle/one_device.py).
 
 | Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -139,11 +139,19 @@ Every seed :
 | FORGE (bf16) | 7.29 | 48.78 | 14.96 | 29.92 | 1.96 | 1.93 | 273.5 ± 13.7 | 92 | -26.3% | -20.3% | 1.13× | 1.03× |
 | FORGE (int8) | 5.78 | 36.61 | 14.96 | 17.73 | 1.96 | 1.96 | 272.2 ± 15.1 | 92 | -44.7% | -40.2% | 1.14× | 1.03× |
 
-## Llama-3.1-8B · muon · sequence 512 · TPU v5e-8
+8-chip checks : all pass ([smoke.md](kaggle_v5e8/adamw/smoke.md))
 
-8 chips, tensor parallel, batch 1, one seed; step time : median of 190 steps. Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).
+correctness tests, one chip : FORGE correctness (adamw) : 154 / 160 checks pass ([tests.md](kaggle_v5e8/adamw/tests.md))
+
+## Llama-3.1-8B · muon · TPU v5e-8
+
+8 chips, tensor parallel (benchmarks/kaggle/), batch 1, sequence 512, one seed; step time : median of 190 steps (the first 10 not timed, lr warmup 0). Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; benchmarks/kaggle/one_device.py).
 
 | Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | Muon | 9.75 | 56.38 | 14.96 | 16.92 | 14.96 | 9.54 | 2439.7 ± 21.2 | 10 | — | — | — | — |
 | FORGE (Muon) | 9.24 | 46.89 | 14.96 | 16.92 | 1.96 | 13.04 | 2342.0 ± 15.5 | 11 | -16.8% | -16.8% | 1.04× | 1.04× |
+
+8-chip checks : all pass ([smoke.md](kaggle_v5e8/muon/smoke.md))
+
+correctness tests, one chip : FORGE correctness (muon) : 72 / 72 checks pass ([tests.md](kaggle_v5e8/muon/tests.md))

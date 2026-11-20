@@ -1,18 +1,18 @@
 import gc, importlib, json, os, statistics, sys, time, torch
 from forge_tpu import FusedLinear
-from config import OPTIM, SEED, MAX_STEPS, MAX_SECONDS, WARMUP, LABELS, run_path
+from config import OPTIM, SEED, MAX_STEPS, MAX_SECONDS, WARMUP, LR_WARMUP, LABELS, run_path
 from methods import lr_warmup
 
 #   Readme.md
 #     python benchmarks/train.py <model> <method>     (environment : OPTIM, SEED, SEQ, MAX_SECONDS, see config.py)
 #     Trains ONE method on ONE model (benchmarks/<model>.py) and measures every step, into results/<optim>/<model>/<method>_seed<N>.json :
-#        model, optimizer, method, seed, params, settings      what ran (settings : the model's SETTINGS + warmup, max_steps, max_seconds)
+#        model, optimizer, method, seed, params, settings      what ran (settings : the model's SETTINGS + warmup, lr_warmup, max_steps, max_seconds)
 #        loss, time_ms, peak_gib, held_gib                     one value per step. time : forward + backward + update, between two device syncs.
 #                                                              peak : the largest memory inside the step, held : what is still allocated after it (both above the data)
 #        trace                                                 one more step (not timed), [held, peak since the point before, label] after every leaf module in the forward,
 #                                                              before each of their backwards, and at "start", "loss", "backward", "step"
 #        memory_gib   peak, weights, states, grads, activations      peak : the largest step peak after the warmup. grads : the .grad of the torch optimizer's params
-#                                                                     (FORGE layers never have one). activations = peak - weights - states - grads
+#                                                                     (FORGE layers never have one). activations = peak - (weights + states + grads)
 #        step_ms, tflops   median, std                         over the steps after the WARMUP first ones. TF/s = the model's flops of one step / step time
 GiB = 2**30
 
@@ -75,15 +75,15 @@ def measure(name, method):
         if step % 20 == 0: print(f"{name} {method:12s} step {step:4d}  loss {loss[-1]:.4f}  {time_ms[-1]:8.1f} ms  {peak_gib[-1]:6.2f} GiB", flush = True)
         if t1 - start > MAX_SECONDS: break
     trace = layer_trace(model, opt, data[0], M.loss_fn, base)
-    params, weights, states = sum(p.numel() for p in model.parameters()), nbytes(model.parameters()) / GiB, state_bytes(model, opt) / GiB
-    grads = nbytes(p for group in opt.param_groups for p in group["params"]) / GiB if opt else 0.0   # only the params of a torch optimizer get a .grad
+    params, weights, states = sum(p.numel() for p in model.parameters()), nbytes(model.parameters()), state_bytes(model, opt)          # bytes
+    grads = nbytes(p for group in opt.param_groups for p in group["params"]) if opt else 0                                          # only the params of a torch optimizer get a .grad
     w = WARMUP if len(time_ms) > WARMUP + 1 else 0                                           # a very short run : every step is timed
     peak, tflops = max(peak_gib[w:]), [M.flops(params) / t / 1e9 for t in time_ms[w:]]      # t in ms
     del model, opt; gc.collect()
     return dict(model = name, optimizer = OPTIM, method = method, seed = SEED, params = params,
-                settings = {**M.SETTINGS, "warmup": w, "max_steps": MAX_STEPS, "max_seconds": MAX_SECONDS},
+                settings = {**M.SETTINGS, "warmup": w, "lr_warmup": LR_WARMUP, "max_steps": MAX_STEPS, "max_seconds": MAX_SECONDS},
                 loss = loss, time_ms = time_ms, peak_gib = peak_gib, held_gib = held_gib, trace = trace,
-                memory_gib = dict(peak = peak, weights = weights, states = states, grads = grads, activations = peak - weights - states - grads),
+                memory_gib = dict(peak = peak, weights = weights / GiB, states = states / GiB, grads = grads / GiB, activations = peak - (weights + states + grads) / GiB),
                 step_ms = dict(median = statistics.median(time_ms[w:]), std = statistics.pstdev(time_ms[w:])),
                 tflops = dict(median = statistics.median(tflops), std = statistics.pstdev(tflops)))
 

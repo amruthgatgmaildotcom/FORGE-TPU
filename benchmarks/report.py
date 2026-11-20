@@ -1,7 +1,6 @@
 import glob, json, os, re, shutil, statistics, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import METHODS, BEST, LABELS, MODELS, ROOT, RESULTS, ASSETS, run_path, profile_path, tests_path, kaggle_path
-SEQ_8B = 512                                                                                 # the sequence of the Kaggle runs of Llama-3.1-8B
+from config import METHODS, BEST, LABELS, MODELS, ROOT, RESULTS, ASSETS, run_path, profile_path, tests_path
 
 #   Readme.md
 #     python benchmarks/report.py   ->   results/summary.md (every table) and assets/ (every figure). Plain Python + matplotlib : no torch, no TPU, run it anywhere.
@@ -51,17 +50,18 @@ def combine(seeds):
 
 def load(optim, model): return {m: combine(s) for m, s in runs(optim, model).items()}
 
-def big(optim, seq = SEQ_8B):
-    # Llama-3.1-8B, tensor parallel over 8 TPU v5e chips (one run, seed 0) : step time and loss as measured, memory of ONE device as CALCULATED by the Kaggle run
-    # (kaggle/one_device.py on the python-old branch) from the measured memory of one chip : weights, optimizer states and weight gradient x 8 (each chip holds exactly
-    # 1/8 of them), activations x 2.636 instead of x 8 (most activations are duplicated on every chip, so they are counted once; the factor is the ratio of
-    # one-device to one-chip activations of the same model and data, from a one-device run on another accelerator). "chip_peak" : as measured, the largest chip
+def kaggle_path(optim, method, one_device = True):
+    # a Llama-3.1-8B run of benchmarks/kaggle/ : results/kaggle_v5e8/<optim>/llama8b/<method>_seed0.json, and its one-device memory (_1dev)
+    return os.path.join(RESULTS, "kaggle_v5e8", os.path.relpath(run_path(optim, "llama8b", method, 0), RESULTS))[:-5] + ("_1dev.json" if one_device else ".json")
+
+def big(optim):
+    # Llama-3.1-8B, tensor parallel over 8 TPU v5e chips (one run, seed 0) : step time and loss as measured, the memory of ONE device as CALCULATED
+    # by benchmarks/kaggle/one_device.py from the measured memory of one chip (weights, optimizer states, weight gradient x 8, activations x K). "chip_peak" : measured, the largest chip
     out = {}
     for m in METHODS[optim]:
-        if not os.path.exists(kaggle_path(optim, seq, m)): continue
-        r, c = json.load(open(kaggle_path(optim, seq, m))), json.load(open(kaggle_path(optim, seq, m, False)))
-        out[m] = dict(params = r["params"], seeds = 1, steps = r["steps"], warmup = 10, chip_peak = c["peak"], chips = c["chips"], losses = r["losses"],
-                      **{k: r[k] for k in ("peak", "weights", "states", "grads", "activations", "step_ms", "step_std", "tflops")}, spread = 0.0)
+        if not os.path.exists(kaggle_path(optim, m)): continue
+        r, chip = json.load(open(kaggle_path(optim, m))), json.load(open(kaggle_path(optim, m, False)))
+        out[m] = {**combine([r]), "chip_peak": chip["memory_gib"]["peak"], "chips": chip["chips"]}
     return out
 
 def held(optim, model, method, label):
@@ -303,8 +303,8 @@ def values():
         ref = D[key].get(REF["adamw" if key == "8b" else "muon"])
         for m, r in D[key].items(): V[f"{key}.{m}.saved"] = ref["peak"] - r["peak"]
     # derived
-    V["seq_8b"] = SEQ_8B
-    V["k_1dev"] = json.load(open(kaggle_path("adamw", SEQ_8B, "forge_bf16")))["one_device"]["K"]       # the activation factor of the one-device calculation
+    V["seq_8b"] = D["8b"]["forge_bf16"]["settings"]["seq"]
+    V["k_1dev"] = json.load(open(kaggle_path("adamw", "forge_bf16")))["one_device"]["K"]               # the activation factor of the one-device calculation
     V["qwen.bwd_end_saved"] = held("adamw", "qwen", "adamw_fused", "backward") - held("adamw", "qwen", "forge_bf16", "backward")
     V["qwen.bwd_extra"] = V["prof.qwen.forge_bf16.bwd"] - V["prof.qwen.adamw_fused.bwd"]
     V["qwen.opt_saved"] = V["prof.qwen.adamw_fused.opt"] - V["prof.qwen.forge_bf16.opt"]
@@ -352,6 +352,8 @@ def claims(V, D, gaps, fails):
             (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db"),
             (all(r["dmem"] > 0 for k in a for x, r in a[k].items() if x.startswith("forge")) and all(r["dmem"] > 0 for k in m for x, r in m[k].items() if x.startswith("forge")), "every model : FORGE has less peak memory than vanilla torch"),
             (all(a[k][x]["dstep"] > 0 for k in a for x in ("forge_bf16", "forge_int8")) and all(a[k]["forge_bf16"]["dstep_best"] > 0 for k in a if k != "qwen"), "one chip : FORGE is faster than vanilla AdamW on each model, and faster than fused AdamW except on Qwen3-0.6B"),
+            (D["8b"]["forge_bf16"]["mfu"] < 10, "Llama-3.1-8B : the 8 chips reach less than 10% of their peak"),
+            ([D["8b"][x]["settings"]["warmup"] for x in D["8b"]] == [10] * len(D["8b"]) and all(D["8b"][x]["settings"]["lr_warmup"] == 0 and D["8b"][x]["steps"] == 200 for x in D["8b"]), "Llama-3.1-8B : 200 steps, 10 not timed, no lr warmup"),
             (V["pool_pct.8b"] > V["pool_pct.1b"] and V["act_per_weight.8b"] < V["act_per_weight.1b"], "a larger model : more of the deleted gradient pool leaves the peak, activations are smaller next to the weights"),
             (a["mlp"]["forge_bf16"]["dstep_best"] > a["llama"]["forge_bf16"]["dstep_best"], "larger layers : a larger speed-up against fused AdamW (MLP against Llama-3.2-1B)")]
 
@@ -431,18 +433,25 @@ def summary():
             fails = [(c, " | ".join(k)) for c, *k, _, _, _ in (l.strip().strip("|").split(" | ") for l in open(tests_path(optim)) if "**FAIL**" in l)]
             out += [f"## Correctness · {optim}", "", f"{head} ([tests.md]({os.path.relpath(tests_path(optim), RESULTS)})). Fails : " + ("; ".join(f"{c.strip()} : {k.strip()}" for c, k in fails) or "none"), ""]
     for optim in ("adamw", "muon"):
-        for seq in (SEQ_8B,):
-            R = big(optim, seq)
-            if not R: continue
-            ref, best = R.get(REF[optim]), R.get(BEST[optim])
-            out += [f"## Llama-3.1-8B · {optim} · sequence {seq} · TPU v5e-8", "", f"8 chips, tensor parallel, batch 1, one seed; step time : median of {next(iter(R.values()))['steps'] - 10} steps. "
-                    "Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).", "",
-                    "| Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |", "|---|" + ":--:|" * 13]
-            for m, r in R.items():
-                cmp = lambda b, k: "—" if b is None or b is r else (f"{-pct(r[k], b[k]):+.1f}%" if k == "peak" else f"{x_(r[k], b[k]):.2f}×")
-                out.append(f"| {LABELS[m]} | {r['chip_peak']:.2f} | {r['peak']:.2f} | {r['weights']:.2f} | {r['states']:.2f} | {r['grads']:.2f} | {r['activations']:.2f} | {r['step_ms']:.1f} ± {r['step_std']:.1f} | "
-                           f"{r['tflops']:.0f} | {cmp(ref, 'peak')} | {cmp(best, 'peak')} | {cmp(ref, 'step_ms')} | {cmp(best, 'step_ms')} |")
-            out.append("")
+        R = big(optim)
+        if not R: continue
+        r0, ref, best = next(iter(R.values())), R.get(REF[optim]), R.get(BEST[optim])
+        K = json.load(open(kaggle_path(optim, next(iter(R)))))["one_device"]["K"]
+        out += [f"## Llama-3.1-8B · {optim} · TPU v5e-8", "", f"8 chips, tensor parallel (benchmarks/kaggle/), batch 1, sequence {r0['settings']['seq']}, one seed; step time : median of {r0['steps'] - r0['warmup']} steps "
+                f"(the first {r0['warmup']} not timed, lr warmup {r0['settings']['lr_warmup']}). Peak per chip : measured. Peak of one device : CALCULATED from it "
+                f"(weights, states, weight gradient x 8, activations x {K}; benchmarks/kaggle/one_device.py).", "",
+                "| Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |", "|---|" + ":--:|" * 13]
+        for m, r in R.items():
+            cmp = lambda b, k: "—" if b is None or b is r else (f"{-pct(r[k], b[k]):+.1f}%" if k == "peak" else f"{x_(r[k], b[k]):.2f}×")
+            out.append(f"| {LABELS[m]} | {r['chip_peak']:.2f} | {r['peak']:.2f} | {r['weights']:.2f} | {r['states']:.2f} | {r['grads']:.2f} | {r['activations']:.2f} | {r['step_ms']:.1f} ± {r['step_std']:.1f} | "
+                       f"{r['tflops']:.0f} | {cmp(ref, 'peak')} | {cmp(best, 'peak')} | {cmp(ref, 'step_ms')} | {cmp(best, 'step_ms')} |")
+        k_root = os.path.join(RESULTS, "kaggle_v5e8", optim)
+        for f, what in (("smoke.md", "8-chip checks"), ("tests.md", "correctness tests, one chip")):
+            if os.path.exists(os.path.join(k_root, f)):
+                text = open(os.path.join(k_root, f)).read()
+                verdict = ("all pass" if "ALL PASS" in text else "some fail") if f == "smoke.md" else text.splitlines()[0].strip("# ")
+                out.append(f"\n{what} : {verdict} ([{f}](kaggle_v5e8/{optim}/{f}))")
+        out.append("")
     path = os.path.join(RESULTS, "summary.md"); open(path, "w").write("\n".join(out)); print(f"wrote {path}")
 
 def readme(V, T):
