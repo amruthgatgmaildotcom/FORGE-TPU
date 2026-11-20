@@ -10,36 +10,30 @@
 [![JAX Pallas](https://img.shields.io/badge/JAX-Pallas-7b3fe4.svg?style=for-the-badge)](https://docs.jax.dev/en/latest/pallas/index.html)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.13_·_torch__tpu-ee4c2c.svg?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 
-<p align="center"><b><a href="#-highlights">Highlights</a> · <a href="#-key-results-llama-32-1b-one-tpu-v5e-chip">Key results</a> · <a href="#-llama-31-8b-tpu-v5e-8">Llama-3.1-8B</a> · <a href="#-every-model">Every model</a> · <a href="#%EF%B8%8F-where-the-time-goes">Time</a> · <a href="#-convergence-parity">Convergence</a> · <a href="#-muon">Muon</a> · <a href="#-correctness">Correctness</a> · <a href="#-reproduce">Reproduce</a></b></p>
+<p align="center"><b><a href="#-highlights">Highlights</a> · <a href="#-key-results-llama-32-1b-one-tpu-v5e-chip">Llama-3.2-1B</a> · <a href="#-llama-31-8b-tpu-v5e-8">Llama-3.1-8B</a> · <a href="#-every-model">Every model</a> · <a href="#%EF%B8%8F-where-the-time-goes">Time</a> · <a href="#-muon">Muon</a> · <a href="#-how-it-works-on-tpu">How it works</a></b></p>
 
 </div>
 
 ---
 
-One Pallas kernel fuses the optimizer into the weight-gradient matmul of the backward pass. For every `(b_v, b_h)` weight tile, the MXU accumulates `ΔYᵀX` in an fp32 VMEM tile; AdamW (or Muon's momentum) then reads `W`, `m`, `v` of that tile, updates them, and writes them back **into the same HBM buffers**. **The full `grad_W` is never materialised.**
-
-<div align="center">
-<img src="assets/forge_tiling.png" width="94%" alt="FORGE on TPU : tile-by-tile fused backward + optimizer in VMEM">
-</div>
+One Pallas kernel fuses the optimizer into the weight-gradient matmul of the backward pass. For every weight tile the MXU accumulates the gradient in VMEM, the optimizer updates `W`, `m`, `v` of that tile, and writes them back **into the same HBM buffers**. **The full `grad_W` is never materialised.**
 
 ## ✨ Highlights
 
-- **1.41× faster than PyTorch AdamW on Llama-3.2-1B** (one TPU v5e chip, 213.7 → 152.1 ms/step) and **faster than fused AdamW** (161.4 ms), with **21% less peak memory** (11.79 → 9.35 GiB).
-- **The weight gradient is gone** — Llama-3.2-1B's 2.30 GiB of `grad_W` falls to **0.49 GiB** (only the tied embedding is left on torch); with **int8 moments** the peak falls **35%** (7.65 GiB), still **1.31× faster** than vanilla AdamW.
-- **Llama-3.1-8B : 17.4 GiB of HBM given back** — on one device, peak memory falls from **66.2 GiB (vanilla AdamW) and 61.2 GiB (fused AdamW) to 48.8 GiB** with FORGE (**−26%**), and to **36.6 GiB with int8 moments (−45%, 29.6 GiB saved)** — while the step gets **1.13× faster** (TPU v5e-8, sequence 512; one-device memory calculated from the measured per-chip memory, [see below](#-llama-31-8b-tpu-v5e-8)).
-- **`optimizer.step()` disappears** — on Llama-3.2-1B it shrinks from **79.8 ms (vanilla) and 33.0 ms (fused) to 8.4 ms** : **9.5×** and **3.9×** shorter; only the embedding and the norms are left for it.
-- **Up to 73% of the chip's peak** — with large layers (MLP-1.1B) FORGE is **1.38× faster than vanilla AdamW and 1.16× faster than fused AdamW**, at **143 TF/s** (vanilla AdamW : 103 TF/s), with 23% less memory (37% with int8).
-- **Muon too** — momentum fused into the dW tile, Newton–Schulz after backward : on Llama-3.1-8B **56.4 → 46.9 GiB (−17%, 9.5 GiB saved)** and **1.04× faster** than standard Muon (one device, calculated); on Llama-3.2-1B **9.26 → 7.54 GiB (−19%)** and **1.10× faster** (measured).
-- **Same training** — FORGE (bf16) ends within **0.0002 nats** of PyTorch AdamW on Llama-3.2-1B and the MLP, and on every model its final loss is never further from vanilla AdamW than fused AdamW's is. **153 / 160** correctness checks pass — every fail is an int8 case (approximate by design) or the bias gradient, which FORGE does not update.
+- **1.41× faster than PyTorch AdamW on Llama-3.2-1B** (one TPU v5e chip, 213.7 → 152.1 ms/step), also faster than fused AdamW (161.4 ms), with **21% less peak memory** (11.79 → 9.35 GiB) — **35% less with int8 moments**.
+- **Llama-3.1-8B : 17.4 GiB less memory** — on one device FORGE needs **48.8 GiB instead of 66.2 (vanilla AdamW) and 61.2 (fused AdamW)**, and **36.6 GiB with int8 moments (−45%, 29.5 GiB saved)**. Calculated from a run on 8 chips, [see below](#-llama-31-8b-tpu-v5e-8).
+- **`optimizer.step()` disappears** — on Llama-3.2-1B it shrinks from **79.8 ms (vanilla) and 33.0 ms (fused) to 8.4 ms**; only the embedding and the norms are left for it.
+- **Up to 73% of the chip's peak** — with large layers (MLP-1.1B) FORGE is **1.38× faster than vanilla AdamW and 1.16× faster than fused AdamW**, at 143 TF/s.
+- **Muon too** — **19% less memory and 1.10× faster** than standard Muon on Llama-3.2-1B; **9.5 GiB less (−17%)** on Llama-3.1-8B.
+- **Same training, checked** — on Llama-3.2-1B and the MLP the FORGE (bf16) loss ends within **0.0002 nats** of PyTorch AdamW, and on every model it is never further from it than fused AdamW's; **153 / 160** correctness checks pass (every fail is an int8 case, approximate by design, or the bias gradient, which FORGE does not update).
 
 ## 📊 Key results (Llama-3.2-1B, one TPU v5e chip)
 
 <div align="center">
 <img src="assets/llama_headline.png" width="94%" alt="Llama-3.2-1B : peak memory and memory vs. speed">
-<br><em>The weight gradient (red) collapses under FORGE — what is left belongs to the tied embedding, which stays on torch. Its two arms differ only in moment precision.</em>
 </div>
 
-One TPU v5e chip (16 GiB HBM, 197 TF/s bf16), `transformers` Llama-3.2-1B (1.24B params), batch 1, sequence 512, bf16 weights. Step time : median of 280 timed steps, mean of 2 seeds (± half the gap between them).
+`transformers` Llama-3.2-1B (1.24B params), one TPU v5e chip (16 GiB, 197 TF/s bf16), batch 1, sequence 512, bf16 weights. Step time : median of 280 timed steps, mean of 2 seeds (± half the gap between them).
 
 | Method | Peak (GiB) | weight gradient (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|:--:|
@@ -48,154 +42,100 @@ One TPU v5e chip (16 GiB HBM, 197 TF/s bf16), `transformers` Llama-3.2-1B (1.24B
 | **FORGE (bf16)** | **9.35** | **0.49** | **152.1 ± 2.9** | **26** |
 | **FORGE (int8)** | **7.65** | **0.49** | **162.7 ± 0.4** | **24** |
 
-**FORGE (bf16) beats fused AdamW on memory and on step time at once**; int8 moments take another 1.7 GiB off.
+**FORGE (bf16) beats fused AdamW on memory and on step time at once.** Fused AdamW reaches its peak at the end of backward, when every weight gradient is alive; FORGE has no gradient pool, so its peak moves to the start of backward and it ends backward holding 2.07 GiB less. What is left of the weight gradient belongs to the tied embedding, which stays on torch.
+**int8 moments** take another 1.71 GiB off, but the moments are unpacked and packed again in every tile : the backward takes 5.0 ms longer than with bf16 moments, so int8 runs at 0.99× the speed of fused AdamW.
 
 ## 🦙 Llama-3.1-8B (TPU v5e-8)
 
-Llama-3.1-8B (8.03B params) does not fit on one 16 GiB TPU v5e chip, so it runs **tensor parallel over the 8 chips of a TPU v5e-8** (Kaggle). Every chip runs the unchanged FORGE kernel on its 1/8 of each weight. Batch 1, bf16, one seed; step time : median of 190 steps.
+Llama-3.1-8B does not fit on one 16 GiB chip, so it ran tensor parallel on the 8 chips of a TPU v5e-8 (batch 1, sequence 512, one seed).
 
-> **The one-device memory is calculated, not measured.** What was measured is the peak memory of each chip. To compare with single-device training, the memory of one device is calculated from it : weights, optimizer states and weight gradient **× 8** (each chip holds exactly 1/8 of them), activations **× 2.636** (most activations are the same on every chip; the factor is the ratio of one-device to one-chip activations of the same model and data, from a one-device run on another accelerator). The measured per-chip peak is in the tables too. Step times are measured.
+- **Memory is calculated, not measured.** The peak of each chip was measured, then converted to one device : weights, optimizer states and weight gradient × 8 (each chip holds exactly 1/8 of them), and the activations that every chip holds a copy of are counted once (× 2.64 instead of × 8 : the ratio of one-device to one-chip activations, from a one-device run of the same model and data on another accelerator).
+- **Step time is slow** : I could not make the 8 chips work together efficiently — they reach 92 TF/s together, 6% of their peak. The times compare the methods with each other on the same setup, where both FORGE arms are the fastest.
 
-<div align="center">
-<img src="assets/llama8b_headline.png" width="94%" alt="Llama-3.1-8B : peak memory of one device (calculated) and memory vs. speed">
-<br><em>The weight gradient (red, 15 GiB on one device) collapses under FORGE; its two arms differ only in moment precision. Sequence 512.</em>
-</div>
-
-| Sequence | Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | Step (ms) | TF/s (8 chips) |
-|:--:|---|:--:|:--:|:--:|:--:|
-| 512 | vanilla AdamW | 9.43 | 66.16 | 309.5 ± 18.5 | 81 |
-| | fused AdamW | 8.08 | 61.17 | 280.4 ± 12.7 | 89 |
-| | **FORGE (bf16)** | **7.29** | **48.78 (−26%)** | **273.5 ± 13.7** | **92** |
-| | **FORGE (int8)** | **5.78** | **36.61 (−45%)** | **272.2 ± 15.1** | **92** |
-| 1024 | vanilla AdamW | 9.65 | 67.35 | 324.0 ± 11.0 | 157 |
-| | fused AdamW | 8.94 | 62.38 | 285.8 ± 12.8 | 178 |
-| | **FORGE (bf16)** | **8.84** | **52.67 (−22%)** | **272.8 ± 10.9** | **187** |
-| | **FORGE (int8)** | **7.33** | **40.50 (−40%)** | **279.9 ± 13.4** | **182** |
-
-(−x%) : against vanilla AdamW. **At both lengths FORGE beats fused AdamW on memory and on step time at once** : −20% / −16% memory (one device) and 1.03× / 1.05× faster. The saving shrinks as the sequence grows, because the activations grow while the gradient pool that FORGE deletes stays the same : FORGE is a small-token-count method.
-
-<div align="center">
-<img src="assets/llama8b_parity.png" width="47%" alt="Llama-3.1-8B parity">
-<br><em>The losses on 8 chips : FORGE (bf16) ends within 0.0001 nats of PyTorch AdamW.</em>
-</div>
+| Method | Peak of one device, calculated (GiB) | vs. vanilla AdamW | Step on 8 chips (ms) |
+|---|:--:|:--:|:--:|
+| vanilla AdamW | 66.2 |  | 309.5 |
+| fused AdamW | 61.2 | −8% | 280.4 |
+| **FORGE (bf16)** | **48.8** | **−26%** | **273.5** |
+| **FORGE (int8)** | **36.6** | **−45%** | **272.2** |
 
 ## ⚡ Every model
 
 <div align="center">
 <img src="assets/glance.png" width="94%" alt="Memory saved and speed-up against vanilla AdamW">
-<br><em>Against vanilla AdamW on the same chip, mean of 2 seeds.</em>
 </div>
 
-| Model | Tokens / step | Method | Peak (GiB) | Step (ms) | vs. vanilla AdamW | vs. fused AdamW |
-|---|:--:|---|:--:|:--:|:--:|:--:|
-| **MLP-1.1B** | 4096 | vanilla AdamW | 13.91 | 259.5 | | |
-| | | fused AdamW | 12.69 | 216.7 | −9% mem · 1.20× | |
-| | | **FORGE (bf16)** | **10.67** | **187.5** | **−23% mem · 1.38×** | **−16% mem · 1.16×** |
-| | | **FORGE (int8)** | **8.76** | **188.7** | **−37% mem · 1.38×** | **−31% mem · 1.15×** |
-| **Llama-3.2-1B** | 512 | vanilla AdamW | 11.79 | 213.7 | | |
-| | | fused AdamW | 10.26 | 161.4 | −13% mem · 1.32× | |
-| | | **FORGE (bf16)** | **9.35** | **152.1** | **−21% mem · 1.41×** | **−9% mem · 1.06×** |
-| | | **FORGE (int8)** | **7.65** | **162.7** | **−35% mem · 1.31×** | **−25% mem** · 0.99× |
-| **Qwen3-0.6B** | 512 | vanilla AdamW | 6.03 | 377.6 | | |
-| | | fused AdamW | 5.90 | 355.7 | −2% mem · 1.06× | |
-| | | **FORGE (bf16)** | **5.87** | **367.4** | **−3% mem · 1.03×** | −0.5% mem · 0.97× |
-| | | **FORGE (int8)** | **5.10** | **364.1** | **−15% mem · 1.04×** | **−14% mem** · 0.98× |
+| Model | Method | Peak (GiB) | Step (ms) | vs. vanilla AdamW | vs. fused AdamW |
+|---|---|:--:|:--:|:--:|:--:|
+| **MLP-1.1B** | vanilla AdamW | 13.91 | 259.5 |  |  |
+|  | fused AdamW | 12.69 | 216.7 | −9% mem · 1.20× |  |
+|  | **FORGE (bf16)** | **10.67** | **187.5** | **−23% mem · 1.38×** | −16.0% mem · 1.16× |
+|  | **FORGE (int8)** | **8.76** | **188.7** | **−37% mem · 1.38×** | −31.0% mem · 1.15× |
+| **Llama-3.2-1B** | vanilla AdamW | 11.79 | 213.7 |  |  |
+|  | fused AdamW | 10.26 | 161.4 | −13% mem · 1.32× |  |
+|  | **FORGE (bf16)** | **9.35** | **152.1** | **−21% mem · 1.41×** | −8.8% mem · 1.06× |
+|  | **FORGE (int8)** | **7.65** | **162.7** | **−35% mem · 1.31×** | −25.5% mem · 0.99× |
+| **Qwen3-0.6B** | vanilla AdamW | 6.03 | 377.6 |  |  |
+|  | fused AdamW | 5.90 | 355.7 | −2% mem · 1.06× |  |
+|  | **FORGE (bf16)** | **5.87** | **367.4** | **−3% mem · 1.03×** | −0.5% mem · 0.97× |
+|  | **FORGE (int8)** | **5.10** | **364.1** | **−15% mem · 1.04×** | −13.5% mem · 0.98× |
 
 <div align="center">
 <img src="assets/mlp_headline.png" width="49%" alt="MLP-1.1B"> <img src="assets/qwen_headline.png" width="49%" alt="Qwen3-0.6B">
-<br><em>The larger the layers, the larger the win : on the MLP the TPU is busy the whole step. Qwen3-0.6B has 196 small layers, its step waits for the host issuing tiny ops, and its weight gradient is small next to the 152k-token vocabulary.</em>
 </div>
+
+**Why Qwen3-0.6B gains little.** Its peak is at the start of backward, in the loss over its 151,936-token vocabulary, before any weight gradient exists — for every method. FORGE ends backward holding 1.05 GiB less, but that is not the peak, so only int8 moments lower it. Its 196 weight matrices are small : FORGE's backward takes 44.0 ms longer (it includes 24.2 ms of Python for the 196 updates), more than the 16.5 ms it saves in the optimizer step.
 
 ## ⏱️ Where the time goes
 
-One step with a sync after each phase (`benchmarks/profiling.py`, median of 20 steps, ms). The update moves into the backward kernel, so the optimizer step is almost empty.
+One step with a sync after each phase (`benchmarks/profiling.py`, median of 20 steps, ms).
 
 | Model | Method | Forward | Backward | **Optimizer step** | Step, as trained |
 |---|---|:--:|:--:|:--:|:--:|
 | Llama-3.2-1B | vanilla AdamW | 52.3 | 83.1 | 79.8 | 188.7 |
-| | fused AdamW | 53.6 | 85.3 | 33.0 | 164.5 |
-| | **FORGE (bf16)** | 54.7 | 94.3 | **8.4** | **150.3** |
-| | **FORGE (int8)** | 53.4 | 99.3 | **8.1** | **158.6** |
+|  | fused AdamW | 53.6 | 85.3 | 33.0 | 164.5 |
+|  | **FORGE (bf16)** | 54.7 | 94.3 | **8.4** | **150.3** |
+|  | **FORGE (int8)** | 53.4 | 99.3 | **8.1** | **158.6** |
 | Qwen3-0.6B | vanilla AdamW | 120.4 | 220.1 | 46.1 | 376.8 |
-| | fused AdamW | 112.7 | 203.5 | 26.0 | 351.1 |
-| | **FORGE (bf16)** | 131.7 | 247.5 | **9.5** | **356.0** |
-| | **FORGE (int8)** | 116.4 | 231.4 | **8.7** | **335.3** |
+|  | fused AdamW | 112.7 | 203.5 | 26.0 | 351.1 |
+|  | **FORGE (bf16)** | 131.7 | 247.5 | **9.5** | **356.0** |
+|  | **FORGE (int8)** | 116.4 | 231.4 | **8.7** | **335.3** |
 
 ## 📉 Convergence parity
 
 <div align="center">
-<img src="assets/convergence.gif" width="82%" alt="FORGE tracks PyTorch AdamW on Llama-3.2-1B">
-<br><em>Llama-3.2-1B on one TPU v5e chip, identical data and hyperparameters, mean of 2 seeds : FORGE (bf16) lies on top of PyTorch AdamW for the whole run.</em>
+<img src="assets/convergence.gif" width="78%" alt="FORGE tracks PyTorch AdamW on Llama-3.2-1B">
 </div>
 
-Final loss (the mean of the last 10% of the steps, and of the 2 seeds) :
+Final loss (mean over the last 10% of the steps that every method ran, and over the 2 seeds) :
 
 | Model | Steps | vanilla AdamW | fused AdamW | FORGE (bf16) | FORGE (int8) |
 |---|:--:|:--:|:--:|:--:|:--:|
-| MLP-1.1B | 300 | 0.3959 | 0.3960 | **0.3960** | 0.4016 |
-| Llama-3.2-1B | 300 | 0.0123 | 0.0121 | **0.0121** | 0.0330 |
-| Qwen3-0.6B | 217 | 6.0810 | 5.9387 | **6.0441** | 6.0675 |
-
-<div align="center">
-<img src="assets/mlp_parity.png" width="47%" alt="MLP parity"> <img src="assets/llama_parity.png" width="47%" alt="Llama-3.2-1B parity">
-<br>
-<img src="assets/qwen_parity.png" width="47%" alt="Qwen3-0.6B parity"> <img src="assets/llama_muon_parity.png" width="47%" alt="Llama-3.2-1B Muon parity">
-<br><em>Raw losses (light), smoothed losses (bold), the range of the 2 seeds (band), a zoom on the last steps. The transformers train on 8 fixed sequences and learn them by heart, a chaotic regime in bf16 — FORGE still follows PyTorch step for step.</em>
-</div>
+| MLP-1.1B | 300 | 0.3959 | 0.3960 | **0.3960** | **0.4016** |
+| Llama-3.2-1B | 300 | 0.0123 | 0.0121 | **0.0121** | **0.0330** |
+| Qwen3-0.6B | 217 | 6.0848 | 5.9684 | **6.0509** | **6.0675** |
 
 ## 🌀 Muon
 
-Only `B = 0.95 B + G` is tile-local, so only it is fused into the dW tile; Newton–Schulz needs the whole matrix and runs after backward. Standard Muon gets `G` from autograd and folds it into `B` in its own pass — the two arms differ only there. 512 tokens per step (Llama-3.1-8B : 512 and 1024), 1 seed.
-
-<div align="center">
-<img src="assets/llama_muon_headline.png" width="94%" alt="Llama-3.2-1B with Muon">
-</div>
+Only `B = 0.95 B + G` is tile-local, so only it is fused into the dW tile; Newton–Schulz needs the whole matrix and runs after backward. Standard Muon gets `G` from autograd and folds it into `B` in its own pass. One seed.
 
 | Model | Method | Peak (GiB) | Step (ms) | vs. standard Muon |
 |---|---|:--:|:--:|:--:|
-| Llama-3.2-1B | Muon | 9.26 | 910.6 ± 31.6 | |
-| | **FORGE (Muon)** | **7.54** | **827.5 ± 29.3** | **−19% mem · 1.10×** |
-| Qwen3-0.6B | Muon | 5.06 | 1057.6 ± 87.1 | |
-| | **FORGE (Muon)** | **5.04** | **1006.9 ± 64.9** | **−0.2% mem · 1.05×** |
-| Llama-3.1-8B, seq 512 · one device, calculated | Muon | 56.38 | 2439.7 ± 21.2 | |
-| | **FORGE (Muon)** | **46.89** | **2342.0 ± 15.5** | **−17% mem · 1.04×** |
-| Llama-3.1-8B, seq 1024 · one device, calculated | Muon | 57.40 | 2456.2 ± 20.1 | |
-| | **FORGE (Muon)** | **46.91** | **2343.5 ± 18.9** | **−18% mem · 1.05×** |
+| Llama-3.2-1B | Muon | 9.26 | 910.6 |  |
+|  | **FORGE (Muon)** | **7.54** | **827.5** | **−18.6% mem · 1.10×** |
+| Qwen3-0.6B | Muon | 5.06 | 1057.6 |  |
+|  | **FORGE (Muon)** | **5.04** | **1006.9** | **−0.2% mem · 1.05×** |
+| Llama-3.1-8B, one device (calculated), 8 chips | Muon | 56.38 | 2439.7 |  |
+|  | **FORGE (Muon)** | **46.89** | **2342.0** | **−16.8% mem · 1.04×** |
 
-On Llama-3.1-8B (TPU v5e-8) the measured peak per chip is 9.75 → 9.24 GiB at sequence 512 and 10.20 → 9.25 GiB at 1024.
-
-<div align="center">
-<img src="assets/llama8b_muon_headline.png" width="94%" alt="Llama-3.1-8B with Muon">
-</div>
-
-## ✅ Correctness
-
-`benchmarks/tests.py` checks FORGE against `torch.optim.AdamW` on the CPU in fp32 : single steps from a non-zero state on four shapes, real-model gradient sizes, 10 steps through two layers, and a small Llama trained with every method — **153 / 160 checks pass** ([report](results/adamw/tests.md)).
-
-- Every bf16 weight and moment of FORGE (bf16) is within **one bf16 ulp** of PyTorch.
-- The 7 fails : 6 int8 cases (int8 moments are approximate by design) and the bias gradient `db` (summed in bf16; FORGE does not update the bias).
+On Qwen3-0.6B the memory does not change, for the same reason as with AdamW : its peak is at the start of backward.
 
 ## 🧠 How it works on TPU
 
-- **One Pallas kernel**, grid `(V/b_v, H/b_h, BT/b_bt)`. The MXU accumulates the gradient tile in fp32; at the last token block the optimizer runs on the tile in vregs. When the token axis is one block, the tile goes straight to the update with no scratch pass.
-- **In place.** `W` and the moments are donated (`input_output_aliases`) and the torch tensors are rebound to the new buffers. `dx = ΔY·W` is issued first, with the old `W`, so the chain rule holds.
-- **Fast launch.** The first launch of each layer shape goes through `torch.tpu.pallas.jax_op`; every later one is replayed directly.
-- **AdamW (bf16 or int8 moments), SGD and Muon** share the kernel (`src/forge_tpu/kernel/optimizers.py`, `codecs.py`). Embeddings, the tied head and the norms stay on fused AdamW.
+<div align="center">
+<img src="assets/forge_tiling.png" width="94%" alt="FORGE on TPU : tile-by-tile fused backward + optimizer in VMEM">
+</div>
 
-## 🔁 Reproduce
-
-Paste `benchmarks/colab_cell.py` into one Colab cell (TPU v5e-1) and upload the repo zip. It runs the tests, every training run, the profiles and `benchmarks/report.py`, and downloads `results.zip` (`results/` + `assets/`).
-
-| | |
-|---|---|
-| Hardware | one TPU v5e chip (Colab) : 16 GiB HBM, 197 TF/s bf16. Llama-3.1-8B : TPU v5e-8 (Kaggle), 8 chips, tensor parallel |
-| Software | torch 2.13, torch_tpu 0.3, jax 0.12 (Pallas), transformers 5 |
-| Models | MLP-1.1B (8 residual blocks, D 4096, FF 16384); Llama-3.2-1B and Qwen3-0.6B from `transformers` with the official `config.json` numbers; random init, synthetic data |
-| Runs | batch 1, 512 tokens (MLP : 4096), 8 fixed batches; 20 lr-warmup steps not timed, then up to 300 steps or 120 s (Muon : 180 s); AdamW seeds 0 and 1, Muon seed 0 |
-
-```
-src/forge_tpu/   module.py (FusedLinear) · autograd.py · _bridge.py (torch ↔ Pallas) · muon.py · kernel/ (fused_grad.py, optimizers.py, codecs.py)
-benchmarks/      config.py (what runs, where it goes) · methods.py · mlp.py llama.py qwen.py · train.py · profiling.py · tests.py · tiler.py · report.py · colab_cell.py
-results/         <optim>/<model>/<method>_seed<N>.json, profile_<method>.json, <optim>/tests.md, summary.md (every table)
-assets/          every figure here (benchmarks/report.py)
-```
+- **One Pallas kernel**, grid `(V/b_v, H/b_h, BT/b_bt)` : the MXU accumulates the gradient tile in fp32, then the optimizer runs on the tile. `W` and the moments are donated (`input_output_aliases`), so the update is in place; `dx = ΔY·W` is issued first, with the old `W`.
+- **AdamW (bf16 or int8 moments), SGD and Muon** share the kernel (`src/forge_tpu/kernel/`). Embeddings, the tied head and the norms stay on fused AdamW.
+- **Reproduce** : paste `benchmarks/colab_cell.py` into one Colab cell (TPU v5e-1) and upload the repo zip; `benchmarks/report.py` writes every table (`results/summary.md`), figure (`assets/`) and number of this README from `results/`.

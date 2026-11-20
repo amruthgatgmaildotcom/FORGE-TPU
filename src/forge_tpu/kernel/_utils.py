@@ -57,8 +57,7 @@ TILES = {  # {(BT, V, H): (bv, bh, bbt)} : the tiles of one layer shape, DEFAULT
     # Llama-3.1-8B on 8 chips (kaggle/tp.py), the layer shapes of one chip. NOT measured yet : chosen with an HBM traffic + pipeline model (12 B/param moved, x re-read once per row
     # block, go once per column block, the first load and the last store not hidden, 0.35 us per grid step). The gain : gate / up (V = 1792) are one row block, the default bv = 512
     # gave a half-empty last block (1/8 of the traffic wasted); q and k / v get more, smaller column blocks, so the pipeline hides more of the loads. Same results as the default tiles.
-    (512, 512, 4096): (512, 512, 512),    (512, 128, 4096): (128, 1024, 512),    (512, 1792, 4096): (1792, 512, 512),
-    (1024, 512, 4096): (512, 1024, 1024), (1024, 128, 4096): (128, 1024, 1024),  (1024, 4096, 512): (1024, 512, 1024), (1024, 1792, 4096): (1792, 512, 1024)}
+    (512, 512, 4096): (512, 512, 512),    (512, 128, 4096): (128, 1024, 512),    (512, 1792, 4096): (1792, 512, 512)}
 def tiles_for(BT, V, H, tiles, codec):
   # the tiles of one call : given ones, else the measured best of this shape (TILES), else DEFAULT_TILES. A TILES entry the state format cannot use (int8 : bv % 512) falls back to the default
     if tiles is None and (BT, V, H) in TILES:

@@ -1,6 +1,7 @@
 import glob, json, os, re, shutil, statistics, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import METHODS, BEST, LABELS, MODELS, RESULTS, ASSETS, run_path, profile_path, tests_path, kaggle_path
+from config import METHODS, BEST, LABELS, MODELS, ROOT, RESULTS, ASSETS, run_path, profile_path, tests_path, kaggle_path
+SEQ_8B = 512                                                                                 # the sequence of the Kaggle runs of Llama-3.1-8B
 
 #   Readme.md
 #     python benchmarks/report.py   ->   results/summary.md (every table) and assets/ (every figure). Plain Python + matplotlib : no torch, no TPU, run it anywhere.
@@ -8,10 +9,11 @@ from config import METHODS, BEST, LABELS, MODELS, RESULTS, ASSETS, run_path, pro
 #     method : the numbers are the mean over the seeds, "±" is half the gap between the seeds, the losses are the per-step mean (the band in the plots : min to max).
 #        assets/forge_tiling.png                 the kernel, drawn (no data)
 #        assets/<model>_headline.png             AdamW : peak memory, split in weights / optimizer states / activations / weight gradient, and memory vs. speed
-#        assets/<model>_muon_headline.png        the same for Muon
+#        assets/llama_muon_headline.png          the same for Muon on Llama-3.2-1B
 #        assets/glance.png                       every model at once against vanilla AdamW : memory saved, speed-up
-#        assets/<model>_parity.png, assets/<model>_muon_parity.png, assets/convergence.gif     the losses, step by step
-#        assets/llama8b_headline.png, assets/llama8b_muon_headline.png, assets/llama8b_parity.png    Llama-3.1-8B on 8 chips (results/kaggle_v5e8), memory of ONE device, calculated
+#        assets/convergence.gif                  Llama-3.2-1B, the losses step by step
+#     README.md : benchmarks/README.template.md with every {{key}} (or {{key:format}}) replaced by a number of this file (values()), and every claim of the text
+#     checked against the numbers first (claims()) : if one is false, README.md is NOT written.
 PEAK_TFLOPS = 197.0                                                                          # TPU v5e, bf16, one chip
 REF = {o: m[0] for o, m in METHODS.items()}                                                  # vanilla torch : the reference
 ORDER = METHODS
@@ -49,10 +51,11 @@ def combine(seeds):
 
 def load(optim, model): return {m: combine(s) for m, s in runs(optim, model).items()}
 
-def big(optim, seq):
-    # Llama-3.1-8B, tensor parallel over 8 TPU v5e chips (one run, seed 0) : step time and loss as measured, memory of ONE device as CALCULATED by the Kaggle run from the
-    # memory of one chip : weights, optimizer states and weight gradient x 8 (each chip holds exactly 1/8 of them), activations x 2.636 (most activations are the same
-    # on every chip; the factor is the ratio of one-device to one-chip activations of the same model and data, from a one-device run on another accelerator). "chip" : measured
+def big(optim, seq = SEQ_8B):
+    # Llama-3.1-8B, tensor parallel over 8 TPU v5e chips (one run, seed 0) : step time and loss as measured, memory of ONE device as CALCULATED by the Kaggle run
+    # (kaggle/one_device.py on the python-old branch) from the measured memory of one chip : weights, optimizer states and weight gradient x 8 (each chip holds exactly
+    # 1/8 of them), activations x 2.636 instead of x 8 (most activations are duplicated on every chip, so they are counted once; the factor is the ratio of
+    # one-device to one-chip activations of the same model and data, from a one-device run on another accelerator). "chip_peak" : as measured, the largest chip
     out = {}
     for m in METHODS[optim]:
         if not os.path.exists(kaggle_path(optim, seq, m)): continue
@@ -60,6 +63,18 @@ def big(optim, seq):
         out[m] = dict(params = r["params"], seeds = 1, steps = r["steps"], warmup = 10, chip_peak = c["peak"], chips = c["chips"], losses = r["losses"],
                       **{k: r[k] for k in ("peak", "weights", "states", "grads", "activations", "step_ms", "step_std", "tflops")}, spread = 0.0)
     return out
+
+def held(optim, model, method, label):
+    # memory held at one labelled point of the traced step ("loss" = right before backward, "backward" = right when it ends), mean over the seeds
+    return statistics.mean(next(p[0] for p in r["trace"] if p[2] == label) for r in runs(optim, model)[method])
+
+def peak_phase(optim, model, method):
+    # where the traced step of seed 0 reaches its peak : "forward", "start of backward" / "end of backward" (the first / last 5 % of the backward points), "backward", "step"
+    t = runs(optim, model)[method][0]["trace"]; at = {p[2]: i for i, p in enumerate(t) if p[2]}
+    i, a, b = max(range(len(t)), key = lambda k: t[k][1]), at["loss"], at["backward"]
+    if i <= a: return "forward"
+    if i > b: return "step"
+    return "start of backward" if i - a <= 0.05 * (b - a) else "end of backward" if b - i <= 0.05 * (b - a) else "backward"
 
 def profiles(optim, model):
     return {m: json.load(open(profile_path(optim, model, m))) for m in METHODS[optim] if os.path.exists(profile_path(optim, model, m))}
@@ -161,36 +176,6 @@ def glance(rows, path):
     a.legend(fontsize = 10.5, loc = "lower right")
     fig.tight_layout(); fig.savefig(path, dpi = 160); plt.close(fig)
 
-def parity(R, optim, title, path, note = ""):
-    # the parity plot : raw losses (thin, light), smoothed losses (bold), the seed range (band, when there are several seeds), a zoom on the last 15 %, the gap to vanilla torch
-    plt = plt_()
-    n = min(r["steps"] for r in R.values()); s = span_of(n)
-    order = [m for m in ORDER[optim] if m in R]
-    fig, ax = plt.subplots(figsize = (7.2, 5.0))
-    for m in order: ax.plot(range(n), R[m]["losses"][:n], color = "#a99aa8", lw = 0.6, alpha = 0.45, zorder = 1)
-    for m in order:
-        c, ls = LINE[m]
-        if "lo" in R[m] and R[m].get("seeds", 1) > 1: ax.fill_between(range(n), smooth(R[m]["lo"][:n], s), smooth(R[m]["hi"][:n], s), color = c, alpha = 0.10, lw = 0, zorder = 2)
-        ax.plot(range(n), smooth(R[m]["losses"][:n], s), color = c, ls = ls, lw = 2.1 if m.startswith("forge") else 1.7, label = LABELS[m], zorder = 3)
-    hi = max(sorted(R[m]["losses"][:n])[int(n * 0.99) - 1] for m in order)
-    ax.set_ylim(0, hi * 1.06); ax.set_xlabel("training step", fontsize = 11); ax.set_ylabel("training loss (nats)" if "MLP" not in title else "training loss (MSE)", fontsize = 11)
-    ax.set_title(title, fontsize = 12); ax.grid(alpha = 0.35); ax.legend(fontsize = 8.5, loc = "upper right", framealpha = 0.95)
-    for sp in ("top", "right"): ax.spines[sp].set_visible(True)
-    z0 = int(n * 0.85)
-    end = statistics.mean(tail(R[m]["losses"][:n]) for m in order)
-    ins = ax.inset_axes([0.33, 0.42, 0.36, 0.40] if end < 0.3 * hi else [0.40, 0.07, 0.36, 0.36])        # the zoom where the curves are not : top middle, or bottom when they end high
-    for m in order:
-        c, ls = LINE[m]
-        ins.plot(range(z0, n), smooth(R[m]["losses"][:n], s)[z0:], color = c, ls = ls, lw = 1.5)
-    zs = [v for m in order for v in smooth(R[m]["losses"][:n], s)[z0:]]
-    pad = (max(zs) - min(zs)) * 0.25 + 1e-4
-    ins.set_ylim(min(zs) - pad, max(zs) + pad); ins.tick_params(labelsize = 6.5); ins.set_title(f"zoom: steps {z0}–{n}", fontsize = 7.5); ins.set_facecolor("white")
-    ref = REF[optim]
-    if ref in R:
-        gaps = {m: abs(tail(R[m]["losses"][:n]) - tail(R[ref]["losses"][:n])) for m in order if m != ref}
-        fig.text(0.5, 0.012, f"final-loss gap to {LABELS[ref]} (nats, mean of the last 10 % of steps){note}:    " + ",    ".join(f"{LABELS[m]}: {v:.4f}" for m, v in gaps.items()), fontsize = 7, ha = "center", va = "bottom")
-    fig.tight_layout(rect = (0, 0.04, 1, 1)); fig.savefig(path, dpi = 150); plt.close(fig)
-
 def gif(R, optim, title, path, frames = 50):
     # the convergence animation : the smoothed losses grow step by step, the raw losses behind them
     plt = plt_()
@@ -280,9 +265,119 @@ def tiling(path):
 
 
 
-#---------------------------------------------------------------------------------------------- tables ------------------------------------------------------------------------------------------------#
+
+#---------------------------------------------------------------------------------------------- numbers ----------------------------------------------------------------------------------------------#
 
 
+
+def compare(R, optim):
+    # every method of R with its comparisons : dmem = % less peak than vanilla torch (x : times faster), dmem_best / x_best : against the best torch method
+    if not R: return R
+    ref, best = R.get(REF[optim]), R.get(BEST[optim])
+    n = min(r["steps"] for r in R.values())                                                  # the final loss of every method over the same steps (runs stop on a time limit)
+    for m, r in R.items():
+        r.update(mfu = r["tflops"] / PEAK_TFLOPS * 100 / r.get("chips", 1), loss = tail(r["losses"][:n]), common_steps = n, timed = r["steps"] - r["warmup"])
+        if ref:  r.update(dmem = pct(r["peak"], ref["peak"]),  x = x_(r["step_ms"], ref["step_ms"]))
+        if best: r.update(dmem_best = pct(r["peak"], best["peak"]), x_best = x_(r["step_ms"], best["step_ms"]))
+    return R
+
+def values():
+    # every number the README can show, as {"key": value}. Keys : <model>.<method>.<field> (AdamW), muon.<model>.<method>.<field>, 8b.<method>.<field>,
+    # 8b_muon.<method>.<field>, prof.<model>.<method>.<field>, and a few derived ones (see the end)
+    V, D = {}, {"adamw": {}, "muon": {}}
+    def put(prefix, R):
+        for m, r in R.items():
+            for k, v in r.items():
+                if isinstance(v, (int, float)): V[f"{prefix}{m}.{k}"] = v
+    for model in MODELS:
+        for optim in ("adamw", "muon"):
+            R = compare(load(optim, model), optim)
+            if R: D[optim][model] = R; put(f"{model}." if optim == "adamw" else f"muon.{model}.", R)
+        for m, p in profiles("adamw", model).items():
+            s, o = p["per_phase"], p["one_sync"]
+            V.update({f"prof.{model}.{m}.{k}": v for k, v in dict(fwd = s["forward"]["done"], bwd = s["backward"]["done"], bwd_issued = s["backward"]["issued"], opt = s["step"]["done"],
+                                                                     step = o["done"], issued = o["step"], py = o["forge_python"], updates = p["forge_updates"]).items()})
+    D["8b"], D["8b_muon"] = compare(big("adamw"), "adamw"), compare(big("muon"), "muon")
+    put("8b.", D["8b"]); put("8b_muon.", D["8b_muon"])
+    for key in ("8b", "8b_muon"):
+        ref = D[key].get(REF["adamw" if key == "8b" else "muon"])
+        for m, r in D[key].items(): V[f"{key}.{m}.saved"] = ref["peak"] - r["peak"]
+    # derived
+    V["seq_8b"] = SEQ_8B
+    V["qwen.bwd_end_saved"] = held("adamw", "qwen", "adamw_fused", "backward") - held("adamw", "qwen", "forge_bf16", "backward")
+    V["qwen.bwd_extra"] = V["prof.qwen.forge_bf16.bwd"] - V["prof.qwen.adamw_fused.bwd"]
+    V["qwen.opt_saved"] = V["prof.qwen.adamw_fused.opt"] - V["prof.qwen.forge_bf16.opt"]
+    V["llama.int8_bwd_extra"] = V["prof.llama.forge_int8.bwd"] - V["prof.llama.forge_bf16.bwd"]
+    V["llama.peak_below_fused"] = held("adamw", "llama", "adamw_fused", "backward") - held("adamw", "llama", "forge_bf16", "backward")
+    V["vocab.qwen"] = 151936
+    V["llama.int8_more_saved"] = D["adamw"]["llama"]["forge_bf16"]["peak"] - D["adamw"]["llama"]["forge_int8"]["peak"]
+    gaps = {k: (abs(D["adamw"][k]["forge_bf16"]["loss"] - D["adamw"][k]["adamw"]["loss"]), abs(D["adamw"][k]["adamw_fused"]["loss"] - D["adamw"][k]["adamw"]["loss"])) for k in D["adamw"]}
+    V["same.gap"] = max(gaps[k][0] for k in ("mlp", "llama"))
+    t = open(tests_path("adamw")).read().splitlines()
+    rows = [l for l in t if l.startswith("|") and ("PASS" in l or "FAIL" in l)]
+    fails = [l for l in rows if "**FAIL**" in l]
+    V.update({"tests.total": len(rows), "tests.pass": len(rows) - len(fails), "tests.fails": len(fails), "tests.int8_fails": sum("int8" in l for l in fails)})
+    return V, D, gaps, fails
+
+
+
+#---------------------------------------------------------------------------------------------- claims -----------------------------------------------------------------------------------------------#
+
+
+
+def claims(V, D, gaps, fails):
+    # every sentence of the README that is not a plain number, checked against the numbers. [(true ?, the claim)]
+    a, m, b8 = D["adamw"], D["muon"], D["8b"]
+    return [(a["llama"]["forge_bf16"]["step_ms"] < a["llama"]["adamw_fused"]["step_ms"] and a["llama"]["forge_bf16"]["peak"] < a["llama"]["adamw_fused"]["peak"], "Llama-3.2-1B : FORGE (bf16) is faster AND smaller than fused AdamW"),
+            (a["mlp"]["forge_bf16"]["step_ms"] < a["mlp"]["adamw_fused"]["step_ms"] and a["mlp"]["forge_int8"]["step_ms"] < a["mlp"]["adamw_fused"]["step_ms"], "MLP : both FORGE arms are faster than fused AdamW"),
+            (peak_phase("adamw", "llama", "adamw_fused") == "end of backward" and peak_phase("adamw", "llama", "forge_bf16") == "start of backward", "Llama-3.2-1B : fused AdamW peaks at the end of backward, FORGE at the start of backward"),
+            (all(peak_phase(o, "qwen", x) == "start of backward" for o, x in (("adamw", "adamw_fused"), ("adamw", "forge_bf16"), ("muon", "muon"), ("muon", "forge_muon"))), "Qwen3-0.6B : every method peaks at the start of backward"),
+            (V["qwen.bwd_extra"] > V["qwen.opt_saved"], "Qwen3-0.6B : FORGE's longer backward costs more than its shorter optimizer step saves"),
+            (a["qwen"]["forge_bf16"]["step_ms"] > a["qwen"]["adamw_fused"]["step_ms"], "Qwen3-0.6B : FORGE (bf16) is slower than fused AdamW"),
+            (a["llama"]["forge_int8"]["step_ms"] > a["llama"]["forge_bf16"]["step_ms"] and V["llama.int8_bwd_extra"] > 0, "Llama-3.2-1B : int8 is slower than bf16, its backward is longer"),
+            (b8["forge_bf16"]["peak"] < b8["adamw_fused"]["peak"] and b8["forge_bf16"]["step_ms"] < b8["adamw_fused"]["step_ms"], "Llama-3.1-8B : FORGE (bf16) is faster AND smaller than fused AdamW"),
+            (max(b8[x]["step_ms"] for x in ("forge_bf16", "forge_int8")) < min(b8[x]["step_ms"] for x in ("adamw", "adamw_fused")), "Llama-3.1-8B : both FORGE arms are faster than both torch methods"),
+            (m["llama"]["forge_muon"]["peak"] < m["llama"]["muon"]["peak"] and m["llama"]["forge_muon"]["step_ms"] < m["llama"]["muon"]["step_ms"], "Llama-3.2-1B : FORGE (Muon) is faster AND smaller than Muon"),
+            (all(g <= f + 1e-4 for g, f in gaps.values()), "every model : the FORGE (bf16) final loss is never further from vanilla AdamW than fused AdamW's"),
+            (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db")]
+
+
+
+#---------------------------------------------------------------------------------------------- tables -----------------------------------------------------------------------------------------------#
+
+
+
+def tables(V, D):
+    # the tables of the README, as markdown strings (key "table.<name>")
+    B = lambda m, x: f"**{x}**" if m.startswith("forge") else x
+    T = {}
+    R = D["adamw"]["llama"]
+    T["table.llama"] = "\n".join(["| Method | Peak (GiB) | weight gradient (GiB) | Step (ms) | TF/s |", "|---|:--:|:--:|:--:|:--:|"] +
+                                 [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['grads']:.2f}')} | {B(m, f'{r['step_ms']:.1f} ± {r['spread']:.1f}')} | {B(m, f'{r['tflops']:.0f}')} |" for m, r in R.items()])
+    T["table.8b"] = "\n".join(["| Method | Peak of one device, calculated (GiB) | vs. vanilla AdamW | Step on 8 chips (ms) |", "|---|:--:|:--:|:--:|"] +
+                              [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.1f}')} | {'' if m == 'adamw' else B(m, f'−{r['dmem']:.0f}%')} | {B(m, f'{r['step_ms']:.1f}')} |" for m, r in D["8b"].items()])
+    rows = ["| Model | Method | Peak (GiB) | Step (ms) | vs. vanilla AdamW | vs. fused AdamW |", "|---|---|:--:|:--:|:--:|:--:|"]
+    for model, title in MODELS.items():
+        for k, (m, r) in enumerate(D["adamw"][model].items()):
+            vs = "" if m == "adamw" else B(m, f"−{r['dmem']:.0f}% mem · {r['x']:.2f}×")
+            vb = "" if m in ("adamw", "adamw_fused") else f"−{r['dmem_best']:.1f}% mem · {r['x_best']:.2f}×"
+            rows.append(f"| {f'**{title}**' if k == 0 else ''} | {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['step_ms']:.1f}')} | {vs} | {vb} |")
+    T["table.models"] = "\n".join(rows)
+    rows = ["| Model | Method | Forward | Backward | **Optimizer step** | Step, as trained |", "|---|---|:--:|:--:|:--:|:--:|"]
+    for model in ("llama", "qwen"):
+        for k, m in enumerate(METHODS["adamw"]):
+            p = lambda f: V[f"prof.{model}.{m}.{f}"]
+            opt, step = f"{p('opt'):.1f}", f"{p('step'):.1f}"
+            rows.append(f"| {MODELS[model] if k == 0 else ''} | {B(m, LABELS[m])} | {p('fwd'):.1f} | {p('bwd'):.1f} | {B(m, opt)} | {B(m, step)} |")
+    T["table.profile"] = "\n".join(rows)
+    T["table.loss"] = "\n".join(["| Model | Steps | " + " | ".join(LABELS[m] for m in METHODS["adamw"]) + " |", "|---|:--:|" + ":--:|" * 4] +
+                                [f"| {MODELS[k]} | {R['adamw']['common_steps']} | " + " | ".join(B(m, f"{R[m]['loss']:.4f}") for m in METHODS["adamw"]) + " |" for k, R in D["adamw"].items()])
+    rows = ["| Model | Method | Peak (GiB) | Step (ms) | vs. standard Muon |", "|---|---|:--:|:--:|:--:|"]
+    for title, R in [(MODELS[k], D["muon"][k]) for k in D["muon"]] + [(f"Llama-3.1-8B, one device (calculated), 8 chips", D["8b_muon"])]:
+        for k, (m, r) in enumerate(R.items()):
+            rows.append(f"| {title if k == 0 else ''} | {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['step_ms']:.1f}')} | {'' if m == 'muon' else B(m, f'−{r['dmem']:.1f}% mem · {r['x']:.2f}×')} |")
+    T["table.muon"] = "\n".join(rows)
+    return T
 
 def summary():
     # results/summary.md : every table, from the recorded runs only
@@ -322,7 +417,7 @@ def summary():
             fails = [(c, " | ".join(k)) for c, *k, _, _, _ in (l.strip().strip("|").split(" | ") for l in open(tests_path(optim)) if "**FAIL**" in l)]
             out += [f"## Correctness · {optim}", "", f"{head} ([tests.md]({os.path.relpath(tests_path(optim), RESULTS)})). Fails : " + ("; ".join(f"{c.strip()} : {k.strip()}" for c, k in fails) or "none"), ""]
     for optim in ("adamw", "muon"):
-        for seq in (512, 1024):
+        for seq in (SEQ_8B,):
             R = big(optim, seq)
             if not R: continue
             ref, best = R.get(REF[optim]), R.get(BEST[optim])
@@ -336,6 +431,15 @@ def summary():
             out.append("")
     path = os.path.join(RESULTS, "summary.md"); open(path, "w").write("\n".join(out)); print(f"wrote {path}")
 
+def readme(V, T):
+    # README.template.md -> README.md : {{key}} or {{key:format}} -> the value. An unknown key stops it
+    def fill(match):
+        key, fmt = match.group(1), match.group(2)
+        v = {**V, **T}[key]                                                                  # KeyError : the template asks for a number that does not exist
+        return format(v, fmt) if fmt else str(v)
+    text = re.sub(r"\{\{\s*([\w.]+)(?::([^}]+))?\s*\}\}", fill, open(os.path.join(ROOT, "benchmarks", "README.template.md")).read())
+    open(os.path.join(ROOT, "README.md"), "w").write(text); print("wrote README.md")
+
 
 
 #----------------------------------------------------------------------------------------------- main -------------------------------------------------------------------------------------------------#
@@ -348,25 +452,19 @@ def main():
     rows = []
     for model, title in MODELS.items():
         R = load("adamw", model)
-        if len(R) > 1:
-            seeds = f", {R['adamw']['seeds']} seeds" if R.get("adamw", {}).get("seeds", 1) > 1 else ""
-            headline(R, "adamw", os.path.join(ASSETS, f"{model}_headline.png"), f"(a) {title} : peak memory")
-            parity(R, "adamw", f"{title} (AdamW, one TPU v5e{seeds})", os.path.join(ASSETS, f"{model}_parity.png"))
-            if "adamw" in R: rows.append((title, {"mem": {c: pct(R[m]["peak"], R["adamw"]["peak"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R},
-                                                  "speed": {c: x_(R[m]["step_ms"], R["adamw"]["step_ms"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R}}))
-            if model == "llama": gif(R, "adamw", f"{title}, one TPU v5e chip", os.path.join(ASSETS, "convergence.gif"))
-        R = load("muon", model)
-        if len(R) > 1:
-            headline(R, "muon", os.path.join(ASSETS, f"{model}_muon_headline.png"), f"(a) {title}, Muon : peak memory")
-            parity(R, "muon", f"{title} (Muon, one TPU v5e)", os.path.join(ASSETS, f"{model}_muon_parity.png"))
+        if len(R) < 2: continue
+        headline(R, "adamw", os.path.join(ASSETS, f"{model}_headline.png"), f"(a) {title} : peak memory")
+        rows.append((title, {"mem":   {c: pct(R[m]["peak"], R["adamw"]["peak"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R},
+                             "speed": {c: x_(R[m]["step_ms"], R["adamw"]["step_ms"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R}}))
+        if model == "llama": gif(R, "adamw", f"{title}, one TPU v5e chip", os.path.join(ASSETS, "convergence.gif"))
     if rows: glance(rows, os.path.join(ASSETS, "glance.png"))
-    R = big("adamw", 512)
-    if len(R) > 1:
-        headline(R, "adamw", os.path.join(ASSETS, "llama8b_headline.png"), "(a) Llama-3.1-8B : one device")
-        parity(R, "adamw", "Llama-3.1-8B (AdamW, TPU v5e-8, sequence 512)", os.path.join(ASSETS, "llama8b_parity.png"))
-    R = big("muon", 512)
-    if len(R) > 1: headline(R, "muon", os.path.join(ASSETS, "llama8b_muon_headline.png"), "(a) Llama-3.1-8B, Muon : one device")
+    R = load("muon", "llama")
+    if len(R) > 1: headline(R, "muon", os.path.join(ASSETS, "llama_muon_headline.png"), "(a) Llama-3.2-1B, Muon : peak memory")
     summary()
+    V, D, gaps, fails = values()
+    wrong = [c for ok, c in claims(V, D, gaps, fails) if not ok]
+    if wrong: print("README.md NOT written, these claims are false now :\n  " + "\n  ".join(wrong))
+    else: readme(V, tables(V, D))
     print("assets :", " ".join(sorted(os.listdir(ASSETS))))
 
 if __name__ == "__main__": main()

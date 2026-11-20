@@ -13,11 +13,10 @@ from config import OPTIM, tiler_path
 # then the triples closest to it. What was not reached is not in the report. Nothing here changes DEFAULT_TILES : read the report, then change it by hand.
 DEVICE, DTYPE = "tpu", torch.bfloat16
 MODELS = {"mlp":   (4096, {(16384, 4096): 8, (4096, 16384): 8, (4096, 4096): 1}),                                    # name : (BT, {(V, H) : how many such fused layers})
-          "llama": (1024, {(2048, 2048): 32, (512, 2048): 32, (8192, 2048): 32, (2048, 8192): 16}),                 # q o | k v | gate up | down, x 16 layers
-          "qwen":  (1024, {(2048, 1024): 28, (1024, 1024): 56, (1024, 2048): 28, (3072, 1024): 56, (1024, 3072): 28}),
+          "llama": (512, {(2048, 2048): 32, (512, 2048): 32, (8192, 2048): 32, (2048, 8192): 16}),                 # q o | k v | gate up | down, x 16 layers
+          "qwen":  (512, {(2048, 1024): 28, (1024, 1024): 56, (1024, 2048): 28, (3072, 1024): 56, (1024, 3072): 28}),
           # Llama-3.1-8B split over 8 chips (kaggle/tp.py) : the layer shapes of ONE chip, so one Colab chip times exactly what each Kaggle chip runs. q | k v | o | gate up | down, x 32 layers
-          "llama8b_seq512":  (512,  {(512, 4096): 32, (128, 4096): 64, (4096, 512): 32, (1792, 4096): 64, (4096, 1792): 32}),
-          "llama8b_seq1024": (1024, {(512, 4096): 32, (128, 4096): 64, (4096, 512): 32, (1792, 4096): 64, (4096, 1792): 32})}   # q | k v | o | gate up | down, x 28 layers
+          "llama8b_seq512":  (512,  {(512, 4096): 32, (128, 4096): 64, (4096, 512): 32, (1792, 4096): 64, (4096, 1792): 32})}
 BV, BH, BBT = (256, 512, 1024, 2048), (512, 1024, 2048, 4096), (512, 1024, 2048)  # every combination is tried (cut to the layer : bv <= V, bh <= H, bbt <= BT)
 DEFAULT = kernel._utils.DEFAULT_TILES
 VMEM = 64 * 2**20                                                      # the kernel's limit (kernel/_utils.py compiler_params). A triple that needs more (rough count, see fits) is not tried

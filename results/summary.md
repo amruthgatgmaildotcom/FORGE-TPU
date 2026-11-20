@@ -139,17 +139,6 @@ Every seed :
 | FORGE (bf16) | 7.29 | 48.78 | 14.96 | 29.92 | 1.96 | 1.93 | 273.5 ± 13.7 | 92 | -26.3% | -20.3% | 1.13× | 1.03× |
 | FORGE (int8) | 5.78 | 36.61 | 14.96 | 17.73 | 1.96 | 1.96 | 272.2 ± 15.1 | 92 | -44.7% | -40.2% | 1.14× | 1.03× |
 
-## Llama-3.1-8B · adamw · sequence 1024 · TPU v5e-8
-
-8 chips, tensor parallel, batch 1, one seed; step time : median of 190 steps. Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).
-
-| Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| vanilla AdamW | 9.65 | 67.35 | 14.96 | 29.92 | 14.96 | 7.51 | 324.0 ± 11.0 | 157 | — | +8.0% | — | 0.88× |
-| fused AdamW | 8.94 | 62.38 | 14.96 | 29.92 | 14.96 | 2.54 | 285.8 ± 12.8 | 178 | -7.4% | — | 1.13× | — |
-| FORGE (bf16) | 8.84 | 52.67 | 14.96 | 29.92 | 1.96 | 5.82 | 272.8 ± 10.9 | 187 | -21.8% | -15.6% | 1.19× | 1.05× |
-| FORGE (int8) | 7.33 | 40.50 | 14.96 | 17.73 | 1.96 | 5.84 | 279.9 ± 13.4 | 182 | -39.9% | -35.1% | 1.16× | 1.02× |
-
 ## Llama-3.1-8B · muon · sequence 512 · TPU v5e-8
 
 8 chips, tensor parallel, batch 1, one seed; step time : median of 190 steps. Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).
@@ -158,12 +147,3 @@ Every seed :
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | Muon | 9.75 | 56.38 | 14.96 | 16.92 | 14.96 | 9.54 | 2439.7 ± 21.2 | 10 | — | — | — | — |
 | FORGE (Muon) | 9.24 | 46.89 | 14.96 | 16.92 | 1.96 | 13.04 | 2342.0 ± 15.5 | 11 | -16.8% | -16.8% | 1.04× | 1.04× |
-
-## Llama-3.1-8B · muon · sequence 1024 · TPU v5e-8
-
-8 chips, tensor parallel, batch 1, one seed; step time : median of 190 steps. Peak per chip : measured. Peak of one device : CALCULATED from it (weights, states, weight gradient x 8, activations x 2.636; report.py, big).
-
-| Method | Peak per chip, measured (GiB) | Peak of one device, calculated (GiB) | weights | states | grads | activations | Step (ms) | TF/s (8 chips) | One device vs. vanilla | vs. best torch | Step vs. vanilla | vs. best torch |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Muon | 10.20 | 57.40 | 14.96 | 16.92 | 14.96 | 10.56 | 2456.2 ± 20.1 | 21 | — | — | — | — |
-| FORGE (Muon) | 9.25 | 46.91 | 14.96 | 16.92 | 1.96 | 13.06 | 2343.5 ± 18.9 | 22 | -18.3% | -18.3% | 1.05× | 1.05× |
