@@ -23,11 +23,15 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 All changes are against vanilla PyTorch AdamW on the same TPU, unless the text gives a different reference.
 
 - **Llama-3.1-8B, one device :** FORGE decreases the peak memory by **26%** (66.2 → 48.8 GiB, 17.4 GiB less). With int8 moments, the peak memory decreases by **45%** (36.6 GiB). [The memory is calculated from a run on a Kaggle TPU v5e-8](#-llama-31-8b-tpu-v5e-8).
-- **Llama-3.2-1B, TPU v5e-1 :** FORGE decreases the step time by **29%** (213.7 → 152.1 ms). It decreases the peak memory by **21%** (11.79 → 9.35 GiB). With int8 moments, the peak memory decreases by **35%**.
-- **Llama-3.2-1B, against fused AdamW :** FORGE decreases the step time by **6%** and the peak memory by **9%**. With int8 moments, the peak memory decreases by **25%**.
-- **Optimizer step, Llama-3.2-1B :** its time decreases by **90%** (79.8 → 8.4 ms), and by **75%** against fused AdamW.
-- **MLP-1.1B, one chip (large layers) :** FORGE decreases the step time by **28%**, and by **13%** against fused AdamW. The chip runs at **73%** of its bf16 peak. The peak memory decreases by **23%** (37% with int8 moments).
-- **Muon :** against standard Muon on Llama-3.2-1B, FORGE decreases the peak memory by **19%** and the step time by **9%**. On Llama-3.1-8B (one device, calculated), it decreases the peak memory by **17%**.
+- **Less memory :** FORGE decreases the peak memory on each model.
+  - Llama-3.2-1B : **−21%** (11.79 → 9.35 GiB), **−35%** with int8 moments. Against fused AdamW : −9%, −25% with int8 moments.
+  - MLP-1.1B : **−23%** (13.91 → 10.67 GiB), **−37%** with int8 moments. Against fused AdamW : −16%, −31% with int8 moments.
+  - Muon, against standard Muon : **−19%** on Llama-3.2-1B, **−17%** on Llama-3.1-8B (one device, calculated).
+- **Less time :** FORGE decreases the step time on each model of one chip. FORGE (bf16) is also faster than fused AdamW, except on Qwen3-0.6B ([see why](#-every-model)).
+  - Llama-3.2-1B : **−29%** (213.7 → 152.1 ms). Against fused AdamW : −6%.
+  - MLP-1.1B : **−28%** (259.5 → 187.5 ms). Against fused AdamW : −13%. The chip runs at **73%** of its bf16 peak.
+  - The optimizer step of Llama-3.2-1B : **−90%** (79.8 → 8.4 ms). Against fused AdamW : −75%.
+  - Muon, against standard Muon : **−9%** on Llama-3.2-1B.
 - **The main limit is the HBM, not FORGE.** One TPU v5e chip has only 16 GiB of HBM. [See below](#%EF%B8%8F-the-main-limit--16-gib-of-hbm).
 
 ## ⚠️ The main limit : 16 GiB of HBM

@@ -23,11 +23,15 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 All changes are against vanilla PyTorch AdamW on the same TPU, unless the text gives a different reference.
 
 - **Llama-3.1-8B, one device :** FORGE decreases the peak memory by **{{8b.forge_bf16.dmem:.0f}}%** ({{8b.adamw.peak:.1f}} → {{8b.forge_bf16.peak:.1f}} GiB, {{8b.forge_bf16.saved:.1f}} GiB less). With int8 moments, the peak memory decreases by **{{8b.forge_int8.dmem:.0f}}%** ({{8b.forge_int8.peak:.1f}} GiB). [The memory is calculated from a run on a Kaggle TPU v5e-8](#-llama-31-8b-tpu-v5e-8).
-- **Llama-3.2-1B, TPU v5e-1 :** FORGE decreases the step time by **{{llama.forge_bf16.dstep:.0f}}%** ({{llama.adamw.step_ms:.1f}} → {{llama.forge_bf16.step_ms:.1f}} ms). It decreases the peak memory by **{{llama.forge_bf16.dmem:.0f}}%** ({{llama.adamw.peak:.2f}} → {{llama.forge_bf16.peak:.2f}} GiB). With int8 moments, the peak memory decreases by **{{llama.forge_int8.dmem:.0f}}%**.
-- **Llama-3.2-1B, against fused AdamW :** FORGE decreases the step time by **{{llama.forge_bf16.dstep_best:.0f}}%** and the peak memory by **{{llama.forge_bf16.dmem_best:.0f}}%**. With int8 moments, the peak memory decreases by **{{llama.forge_int8.dmem_best:.0f}}%**.
-- **Optimizer step, Llama-3.2-1B :** its time decreases by **{{llama.opt_cut:.0f}}%** ({{prof.llama.adamw.opt:.1f}} → {{prof.llama.forge_bf16.opt:.1f}} ms), and by **{{llama.opt_cut_best:.0f}}%** against fused AdamW.
-- **MLP-1.1B, one chip (large layers) :** FORGE decreases the step time by **{{mlp.forge_bf16.dstep:.0f}}%**, and by **{{mlp.forge_bf16.dstep_best:.0f}}%** against fused AdamW. The chip runs at **{{mlp.forge_bf16.mfu:.0f}}%** of its bf16 peak. The peak memory decreases by **{{mlp.forge_bf16.dmem:.0f}}%** ({{mlp.forge_int8.dmem:.0f}}% with int8 moments).
-- **Muon :** against standard Muon on Llama-3.2-1B, FORGE decreases the peak memory by **{{muon.llama.forge_muon.dmem:.0f}}%** and the step time by **{{muon.llama.forge_muon.dstep:.0f}}%**. On Llama-3.1-8B (one device, calculated), it decreases the peak memory by **{{8b_muon.forge_muon.dmem:.0f}}%**.
+- **Less memory :** FORGE decreases the peak memory on each model.
+  - Llama-3.2-1B : **−{{llama.forge_bf16.dmem:.0f}}%** ({{llama.adamw.peak:.2f}} → {{llama.forge_bf16.peak:.2f}} GiB), **−{{llama.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{llama.forge_bf16.dmem_best:.0f}}%, −{{llama.forge_int8.dmem_best:.0f}}% with int8 moments.
+  - MLP-1.1B : **−{{mlp.forge_bf16.dmem:.0f}}%** ({{mlp.adamw.peak:.2f}} → {{mlp.forge_bf16.peak:.2f}} GiB), **−{{mlp.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{mlp.forge_bf16.dmem_best:.0f}}%, −{{mlp.forge_int8.dmem_best:.0f}}% with int8 moments.
+  - Muon, against standard Muon : **−{{muon.llama.forge_muon.dmem:.0f}}%** on Llama-3.2-1B, **−{{8b_muon.forge_muon.dmem:.0f}}%** on Llama-3.1-8B (one device, calculated).
+- **Less time :** FORGE decreases the step time on each model of one chip. FORGE (bf16) is also faster than fused AdamW, except on Qwen3-0.6B ([see why](#-every-model)).
+  - Llama-3.2-1B : **−{{llama.forge_bf16.dstep:.0f}}%** ({{llama.adamw.step_ms:.1f}} → {{llama.forge_bf16.step_ms:.1f}} ms). Against fused AdamW : −{{llama.forge_bf16.dstep_best:.0f}}%.
+  - MLP-1.1B : **−{{mlp.forge_bf16.dstep:.0f}}%** ({{mlp.adamw.step_ms:.1f}} → {{mlp.forge_bf16.step_ms:.1f}} ms). Against fused AdamW : −{{mlp.forge_bf16.dstep_best:.0f}}%. The chip runs at **{{mlp.forge_bf16.mfu:.0f}}%** of its bf16 peak.
+  - The optimizer step of Llama-3.2-1B : **−{{llama.opt_cut:.0f}}%** ({{prof.llama.adamw.opt:.1f}} → {{prof.llama.forge_bf16.opt:.1f}} ms). Against fused AdamW : −{{llama.opt_cut_best:.0f}}%.
+  - Muon, against standard Muon : **−{{muon.llama.forge_muon.dstep:.0f}}%** on Llama-3.2-1B.
 - **The main limit is the HBM, not FORGE.** One TPU v5e chip has only 16 GiB of HBM. [See below](#%EF%B8%8F-the-main-limit--16-gib-of-hbm).
 
 ## ⚠️ The main limit : 16 GiB of HBM

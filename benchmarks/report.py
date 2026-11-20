@@ -348,6 +348,8 @@ def claims(V, D, gaps, fails):
             (m["llama"]["forge_muon"]["peak"] < m["llama"]["muon"]["peak"] and m["llama"]["forge_muon"]["step_ms"] < m["llama"]["muon"]["step_ms"], "Llama-3.2-1B : FORGE (Muon) is faster AND smaller than Muon"),
             (all(g <= f + 1e-4 for g, f in gaps.values()), "every model : the FORGE (bf16) final loss is never further from vanilla AdamW than fused AdamW's"),
             (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db"),
+            (all(r["dmem"] > 0 for k in a for x, r in a[k].items() if x.startswith("forge")) and all(r["dmem"] > 0 for k in m for x, r in m[k].items() if x.startswith("forge")), "every model : FORGE has less peak memory than vanilla torch"),
+            (all(a[k][x]["dstep"] > 0 for k in a for x in ("forge_bf16", "forge_int8")) and all(a[k]["forge_bf16"]["dstep_best"] > 0 for k in a if k != "qwen"), "one chip : FORGE is faster than vanilla AdamW on each model, and faster than fused AdamW except on Qwen3-0.6B"),
             (V["pool_pct.8b"] > V["pool_pct.1b"] and V["act_per_weight.8b"] < V["act_per_weight.1b"], "a larger model : more of the deleted gradient pool leaves the peak, activations are smaller next to the weights"),
             (a["mlp"]["forge_bf16"]["dstep_best"] > a["llama"]["forge_bf16"]["dstep_best"], "larger layers : a larger speed-up against fused AdamW (MLP against Llama-3.2-1B)")]
 
