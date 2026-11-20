@@ -10,7 +10,7 @@
 [![JAX Pallas](https://img.shields.io/badge/JAX-Pallas-7b3fe4.svg?style=for-the-badge)](https://docs.jax.dev/en/latest/pallas/index.html)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.13_·_torch__tpu-ee4c2c.svg?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 
-<p align="center"><b><a href="#-highlights">Highlights</a> · <a href="#-key-results-mlp-11b-one-tpu-v5e-chip">Key results</a> · <a href="#-every-model">Every model</a> · <a href="#%EF%B8%8F-where-the-time-goes">Time</a> · <a href="#-convergence-parity">Convergence</a> · <a href="#-muon">Muon</a> · <a href="#-correctness">Correctness</a> · <a href="#-reproduce">Reproduce</a></b></p>
+<p align="center"><b><a href="#-highlights">Highlights</a> · <a href="#-key-results-llama-32-1b-one-tpu-v5e-chip">Key results</a> · <a href="#-every-model">Every model</a> · <a href="#%EF%B8%8F-where-the-time-goes">Time</a> · <a href="#-convergence-parity">Convergence</a> · <a href="#-muon">Muon</a> · <a href="#-correctness">Correctness</a> · <a href="#-reproduce">Reproduce</a></b></p>
 
 </div>
 
@@ -24,30 +24,30 @@ One Pallas kernel fuses the optimizer into the weight-gradient matmul of the bac
 
 ## ✨ Highlights
 
-- **1.38× faster than PyTorch AdamW on one TPU v5e chip** (MLP-1.1B, 259.5 → 187.5 ms/step) and **1.16× faster than fused AdamW**, at **143 TF/s — 73% of the chip's bf16 peak** (vanilla AdamW : 52%).
-- **The weight gradient is gone** — 2.03 GiB of `grad_W` on the MLP becomes **0**; peak memory falls **23%** (13.91 → 10.67 GiB), and **37% with int8 moments** (8.76 GiB) at the same speed.
+- **1.41× faster than PyTorch AdamW on Llama-3.2-1B** (one TPU v5e chip, 213.7 → 152.1 ms/step) and **faster than fused AdamW** (161.4 ms), with **21% less peak memory** (11.79 → 9.35 GiB).
+- **The weight gradient is gone** — Llama-3.2-1B's 2.30 GiB of `grad_W` falls to **0.49 GiB** (only the tied embedding is left on torch); with **int8 moments** the peak falls **35%** (7.65 GiB), still **1.31× faster** than vanilla AdamW.
 - **`optimizer.step()` disappears** — on Llama-3.2-1B it shrinks from **79.8 ms (vanilla) and 33.0 ms (fused) to 8.4 ms** : **9.5×** and **3.9×** shorter; only the embedding and the norms are left for it.
-- **Real transformers too** — Llama-3.2-1B : **1.41× faster** than vanilla AdamW and faster than fused AdamW, with **21% less memory** (35% with int8).
+- **Up to 73% of the chip's peak** — with large layers (MLP-1.1B) FORGE is **1.38× faster than vanilla AdamW and 1.16× faster than fused AdamW**, at **143 TF/s** (vanilla AdamW : 103 TF/s), with 23% less memory (37% with int8).
 - **Muon too** — momentum fused into the dW tile, Newton–Schulz after backward : Llama-3.2-1B **9.26 → 7.54 GiB (−19%)** and **1.10× faster** than standard Muon.
-- **Same training** — FORGE (bf16) ends within **0.0002 nats** of PyTorch AdamW on the MLP and Llama-3.2-1B, and on every model its final loss is never further from vanilla AdamW than fused AdamW's is. **153 / 160** correctness checks pass — every fail is an int8 case (approximate by design) or the bias gradient, which FORGE does not update.
+- **Same training** — FORGE (bf16) ends within **0.0002 nats** of PyTorch AdamW on Llama-3.2-1B and the MLP, and on every model its final loss is never further from vanilla AdamW than fused AdamW's is. **153 / 160** correctness checks pass — every fail is an int8 case (approximate by design) or the bias gradient, which FORGE does not update.
 
-## 📊 Key results (MLP-1.1B, one TPU v5e chip)
+## 📊 Key results (Llama-3.2-1B, one TPU v5e chip)
 
 <div align="center">
-<img src="assets/mlp_headline.png" width="94%" alt="MLP-1.1B : peak memory and memory vs. speed">
-<br><em>The weight gradient (red) is gone under FORGE; its two arms differ only in moment precision. Both are faster than PyTorch's fused AdamW.</em>
+<img src="assets/llama_headline.png" width="94%" alt="Llama-3.2-1B : peak memory and memory vs. speed">
+<br><em>The weight gradient (red) collapses under FORGE — what is left belongs to the tied embedding, which stays on torch. Its two arms differ only in moment precision.</em>
 </div>
 
-One TPU v5e chip (16 GiB HBM, 197 TF/s bf16), 4096 tokens per step, bf16 weights. Step time : median of 280 timed steps, mean of 2 seeds (± half the gap between them).
+One TPU v5e chip (16 GiB HBM, 197 TF/s bf16), `transformers` Llama-3.2-1B (1.24B params), batch 1, sequence 512, bf16 weights. Step time : median of 280 timed steps, mean of 2 seeds (± half the gap between them).
 
-| Method | Peak (GiB) | Step (ms) | TF/s | MFU |
+| Method | Peak (GiB) | weight gradient (GiB) | Step (ms) | TF/s |
 |---|:--:|:--:|:--:|:--:|
-| vanilla AdamW | 13.91 | 259.5 ± 0.0 | 103 | 52% |
-| fused AdamW | 12.69 | 216.7 ± 0.1 | 124 | 63% |
-| **FORGE (bf16)** | **10.67** | **187.5 ± 0.0** | **143** | **73%** |
-| **FORGE (int8)** | **8.76** | **188.7 ± 0.0** | **142** | **72%** |
+| vanilla AdamW | 11.79 | 2.30 | 213.7 ± 3.0 | 18 |
+| fused AdamW | 10.26 | 2.30 | 161.4 ± 7.3 | 24 |
+| **FORGE (bf16)** | **9.35** | **0.49** | **152.1 ± 2.9** | **26** |
+| **FORGE (int8)** | **7.65** | **0.49** | **162.7 ± 0.4** | **24** |
 
-**FORGE beats fused AdamW on memory and on step time at once** — and int8 moments take another 2 GiB off at the same speed.
+**FORGE (bf16) beats fused AdamW on memory and on step time at once**; int8 moments take another 1.7 GiB off.
 
 ## ⚡ Every model
 
@@ -72,7 +72,7 @@ One TPU v5e chip (16 GiB HBM, 197 TF/s bf16), 4096 tokens per step, bf16 weights
 | | | **FORGE (int8)** | **5.10** | **364.1** | **−15% mem · 1.04×** | **−14% mem** · 0.98× |
 
 <div align="center">
-<img src="assets/llama_headline.png" width="49%" alt="Llama-3.2-1B"> <img src="assets/qwen_headline.png" width="49%" alt="Qwen3-0.6B">
+<img src="assets/mlp_headline.png" width="49%" alt="MLP-1.1B"> <img src="assets/qwen_headline.png" width="49%" alt="Qwen3-0.6B">
 <br><em>The larger the layers, the larger the win : on the MLP the TPU is busy the whole step. Qwen3-0.6B has 196 small layers, its step waits for the host issuing tiny ops, and its weight gradient is small next to the 152k-token vocabulary.</em>
 </div>
 
