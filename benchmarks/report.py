@@ -368,10 +368,11 @@ def tables(V, D):
     B = lambda m, x: f"**{x}**" if m.startswith("forge") else x
     T = {}
     R = D["adamw"]["llama"]
-    T["table.llama"] = "\n".join(["| Method | Peak (GiB) | weight gradient (GiB) | Step (ms) | TF/s |", "|---|:--:|:--:|:--:|:--:|"] +
-                                 [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['grads']:.2f}')} | {B(m, f'{r['step_ms']:.1f} ± {r['spread']:.1f}')} | {B(m, f'{r['tflops']:.0f}')} |" for m, r in R.items()])
-    T["table.8b"] = "\n".join(["| Method | Peak of one device, calculated (GiB) | vs. vanilla AdamW | Step on 8 chips (ms) |", "|---|:--:|:--:|:--:|"] +
-                              [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.1f}')} | {'' if m == 'adamw' else B(m, f"{-r['dmem']:+.0f}%")} | {B(m, f'{r['step_ms']:.1f}')} |" for m, r in D["8b"].items()])
+    vs = lambda m, r, k, d = 0: "" if (m == "adamw" or (k == "_best" and m == "adamw_fused")) else B(m, f"{-r['dmem' + k]:+.{d}f}% memory · {-r['dstep' + k]:+.{d}f}% time")
+    T["table.llama"] = "\n".join(["| Method | Peak (GiB) | weight gradient (GiB) | Step (ms) | vs. vanilla AdamW | vs. fused AdamW |", "|---|:--:|:--:|:--:|:--:|:--:|"] +
+                                 [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['grads']:.2f}')} | {B(m, f'{r['step_ms']:.1f} ± {r['spread']:.1f}')} | {vs(m, r, '')} | {vs(m, r, '_best')} |" for m, r in R.items()])
+    T["table.8b"] = "\n".join(["| Method | Peak of one device, calculated (GiB) | Step on 8 chips (ms) | vs. vanilla AdamW | vs. fused AdamW |", "|---|:--:|:--:|:--:|:--:|"] +
+                              [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.1f}')} | {B(m, f'{r['step_ms']:.1f}')} | {vs(m, r, '')} | {vs(m, r, '_best')} |" for m, r in D["8b"].items()])
     rows = ["| Model | Method | Peak (GiB) | Step (ms) | vs. vanilla AdamW | vs. fused AdamW |", "|---|---|:--:|:--:|:--:|:--:|"]
     for model, title in MODELS.items():
         for k, (m, r) in enumerate(D["adamw"][model].items()):
