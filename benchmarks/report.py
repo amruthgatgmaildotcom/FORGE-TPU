@@ -277,8 +277,8 @@ def compare(R, optim):
     n = min(r["steps"] for r in R.values())                                                  # the final loss of every method over the same steps (runs stop on a time limit)
     for m, r in R.items():
         r.update(mfu = r["tflops"] / PEAK_TFLOPS * 100 / r.get("chips", 1), loss = tail(r["losses"][:n]), common_steps = n, timed = r["steps"] - r["warmup"])
-        if ref:  r.update(dmem = pct(r["peak"], ref["peak"]),  x = x_(r["step_ms"], ref["step_ms"]))
-        if best: r.update(dmem_best = pct(r["peak"], best["peak"]), x_best = x_(r["step_ms"], best["step_ms"]))
+        if ref:  r.update(dmem = pct(r["peak"], ref["peak"]),  x = x_(r["step_ms"], ref["step_ms"]), dstep = pct(r["step_ms"], ref["step_ms"]))
+        if best: r.update(dmem_best = pct(r["peak"], best["peak"]), x_best = x_(r["step_ms"], best["step_ms"]), dstep_best = pct(r["step_ms"], best["step_ms"]))
     return R
 
 def values():
@@ -310,6 +310,8 @@ def values():
     V["llama.int8_bwd_extra"] = V["prof.llama.forge_int8.bwd"] - V["prof.llama.forge_bf16.bwd"]
     V["llama.peak_below_fused"] = held("adamw", "llama", "adamw_fused", "backward") - held("adamw", "llama", "forge_bf16", "backward")
     V["vocab.qwen"] = 151936
+    V["llama.opt_cut"] = pct(V["prof.llama.forge_bf16.opt"], V["prof.llama.adamw.opt"]); V["llama.opt_cut_best"] = pct(V["prof.llama.forge_bf16.opt"], V["prof.llama.adamw_fused.opt"])
+    V["llama.int8_slower_best"] = -D["adamw"]["llama"]["forge_int8"]["dstep_best"]
     V["llama.int8_more_saved"] = D["adamw"]["llama"]["forge_bf16"]["peak"] - D["adamw"]["llama"]["forge_int8"]["peak"]
     gaps = {k: (abs(D["adamw"][k]["forge_bf16"]["loss"] - D["adamw"][k]["adamw"]["loss"]), abs(D["adamw"][k]["adamw_fused"]["loss"] - D["adamw"][k]["adamw"]["loss"])) for k in D["adamw"]}
     V["same.gap"] = max(gaps[k][0] for k in ("mlp", "llama"))
@@ -335,6 +337,7 @@ def claims(V, D, gaps, fails):
             (V["qwen.bwd_extra"] > V["qwen.opt_saved"], "Qwen3-0.6B : FORGE's longer backward costs more than its shorter optimizer step saves"),
             (a["qwen"]["forge_bf16"]["step_ms"] > a["qwen"]["adamw_fused"]["step_ms"], "Qwen3-0.6B : FORGE (bf16) is slower than fused AdamW"),
             (a["llama"]["forge_int8"]["step_ms"] > a["llama"]["forge_bf16"]["step_ms"] and V["llama.int8_bwd_extra"] > 0, "Llama-3.2-1B : int8 is slower than bf16, its backward is longer"),
+            (a["llama"]["forge_int8"]["step_ms"] > a["llama"]["adamw_fused"]["step_ms"], "Llama-3.2-1B : int8 is slower than fused AdamW"),
             (b8["forge_bf16"]["peak"] < b8["adamw_fused"]["peak"] and b8["forge_bf16"]["step_ms"] < b8["adamw_fused"]["step_ms"], "Llama-3.1-8B : FORGE (bf16) is faster AND smaller than fused AdamW"),
             (max(b8[x]["step_ms"] for x in ("forge_bf16", "forge_int8")) < min(b8[x]["step_ms"] for x in ("adamw", "adamw_fused")), "Llama-3.1-8B : both FORGE arms are faster than both torch methods"),
             (m["llama"]["forge_muon"]["peak"] < m["llama"]["muon"]["peak"] and m["llama"]["forge_muon"]["step_ms"] < m["llama"]["muon"]["step_ms"], "Llama-3.2-1B : FORGE (Muon) is faster AND smaller than Muon"),
@@ -355,12 +358,12 @@ def tables(V, D):
     T["table.llama"] = "\n".join(["| Method | Peak (GiB) | weight gradient (GiB) | Step (ms) | TF/s |", "|---|:--:|:--:|:--:|:--:|"] +
                                  [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['grads']:.2f}')} | {B(m, f'{r['step_ms']:.1f} ± {r['spread']:.1f}')} | {B(m, f'{r['tflops']:.0f}')} |" for m, r in R.items()])
     T["table.8b"] = "\n".join(["| Method | Peak of one device, calculated (GiB) | vs. vanilla AdamW | Step on 8 chips (ms) |", "|---|:--:|:--:|:--:|"] +
-                              [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.1f}')} | {'' if m == 'adamw' else B(m, f'−{r['dmem']:.0f}%')} | {B(m, f'{r['step_ms']:.1f}')} |" for m, r in D["8b"].items()])
+                              [f"| {B(m, LABELS[m])} | {B(m, f'{r['peak']:.1f}')} | {'' if m == 'adamw' else B(m, f"{-r['dmem']:+.0f}%")} | {B(m, f'{r['step_ms']:.1f}')} |" for m, r in D["8b"].items()])
     rows = ["| Model | Method | Peak (GiB) | Step (ms) | vs. vanilla AdamW | vs. fused AdamW |", "|---|---|:--:|:--:|:--:|:--:|"]
     for model, title in MODELS.items():
         for k, (m, r) in enumerate(D["adamw"][model].items()):
-            vs = "" if m == "adamw" else B(m, f"−{r['dmem']:.0f}% mem · {r['x']:.2f}×")
-            vb = "" if m in ("adamw", "adamw_fused") else f"−{r['dmem_best']:.1f}% mem · {r['x_best']:.2f}×"
+            vs = "" if m == "adamw" else B(m, f"{-r['dmem']:+.0f}% memory · {-r['dstep']:+.0f}% time")
+            vb = "" if m in ("adamw", "adamw_fused") else f"{-r['dmem_best']:+.1f}% memory · {-r['dstep_best']:+.1f}% time"
             rows.append(f"| {f'**{title}**' if k == 0 else ''} | {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['step_ms']:.1f}')} | {vs} | {vb} |")
     T["table.models"] = "\n".join(rows)
     rows = ["| Model | Method | Forward | Backward | **Optimizer step** | Step, as trained |", "|---|---|:--:|:--:|:--:|:--:|"]
@@ -375,7 +378,7 @@ def tables(V, D):
     rows = ["| Model | Method | Peak (GiB) | Step (ms) | vs. standard Muon |", "|---|---|:--:|:--:|:--:|"]
     for title, R in [(MODELS[k], D["muon"][k]) for k in D["muon"]] + [(f"Llama-3.1-8B, one device (calculated), 8 chips", D["8b_muon"])]:
         for k, (m, r) in enumerate(R.items()):
-            rows.append(f"| {title if k == 0 else ''} | {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['step_ms']:.1f}')} | {'' if m == 'muon' else B(m, f'−{r['dmem']:.1f}% mem · {r['x']:.2f}×')} |")
+            rows.append(f"| {title if k == 0 else ''} | {B(m, LABELS[m])} | {B(m, f'{r['peak']:.2f}')} | {B(m, f'{r['step_ms']:.1f}')} | {'' if m == 'muon' else B(m, f"{-r['dmem']:+.1f}% memory · {-r['dstep']:+.1f}% time")} |")
     T["table.muon"] = "\n".join(rows)
     return T
 
