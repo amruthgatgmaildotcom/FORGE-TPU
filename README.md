@@ -44,13 +44,15 @@ Each number below is against vanilla PyTorch AdamW, then against fused AdamW, on
 The largest disadvantage of this work is the small HBM of one TPU v5e chip (16 GiB). In these results, FORGE gives the most improvement on large layers and on large models. Llama-3.1-8B does not fit on one chip.
 
 - **Large layers make FORGE faster.** Against fused AdamW, the step time decreases by 13% on the MLP-1.1B (large layers, 4096 tokens per step) and by 6% on Llama-3.2-1B (smaller layers, 512 tokens per step).
-- **Large models make FORGE save more memory.** This is because for the same token size larger models have activations taking up much lesser space than weight gradients, so max(0, G-A) looks larger (G is space needed for dw, A is space needed for activations). This is evident from the kaggle run on llama8B which reduced peak from 61GiB to 4GiB (-20%) but only (-9%) on llama1B and almost nothing on qwen0.6B.
-- I could not work out multiple chips (v5e-8) on kaggle in the limited time, but i have shown the results i have gotten.
-
+- **Large models make FORGE save more memory.** Against fused AdamW, FORGE saves G − ΔA. G is the weight gradient that FORGE deletes. ΔA is the activations that are in memory at the peak of FORGE but not at the peak of fused AdamW. For the same number of tokens, a larger model has a larger G, but its activations stay small :
+  - Llama-3.1-8B (calculated) : 13.0 − 0.6 = 12.4 GiB saved, the peak decreases from 61.2 to 48.8 GiB (−20%).
+  - Llama-3.2-1B : 1.8125 − 0.9068 = 0.9057 GiB saved (−9%).
+  - Qwen3-0.6B : −0.5% only ([see why](#-every-model)).
+- **8 chips :** I could not make the 8 chips of a Kaggle TPU v5e-8 work efficiently in the available time. The Llama-3.1-8B results below are the results of that run.
 
 ## 🦙 Llama-3.1-8B (TPU v5e-8)
 
-Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up, and a Kaggle TPU v5e-8 has waiting time of 30 to 40 hours. Thus there is only one configuration : batch 1, sequence 512, one seed, 200 steps (the first 10 not timed, no lr warmup). The code is `benchmarks/kaggle/`. These numbers come from a little earlier version of `src/`. A new run with the current `src/` can give different numbers (more or less the same).
+Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up, and a Kaggle TPU v5e-8 has a waiting time of 30 to 40 hours. Thus there is only one configuration : batch 1, sequence 512, one seed, 200 steps (the first 10 not timed, no lr warmup). The code is `benchmarks/kaggle/`. These numbers come from a slightly earlier version of `src/`. A new run with the current `src/` can give different numbers.
 
 <div align="center">
 <img src="assets/llama8b_headline.png" width="94%" alt="Llama-3.1-8B : peak memory of one device (calculated) and memory vs. speed">
@@ -131,7 +133,6 @@ Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. 
 |  | fused AdamW | 112.7 | 203.5 | 26.0 | 351.1 |
 |  | **FORGE (bf16)** | 131.7 | 247.5 | **9.5** | **356.0** |
 |  | **FORGE (int8)** | 116.4 | 231.4 | **8.7** | **335.3** |
-
 
 ## 🌀 Muon
 

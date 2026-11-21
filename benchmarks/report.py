@@ -10,7 +10,6 @@ from config import METHODS, BEST, LABELS, MODELS, ROOT, RESULTS, ASSETS, run_pat
 #        assets/<model>_headline.png             AdamW : peak memory, split in weights / optimizer states / activations / weight gradient, and memory vs. speed
 #        assets/llama8b_headline.png             the same for Llama-3.1-8B on 8 chips, memory of one device (calculated)
 #        assets/glance.png                       every model at once against vanilla AdamW : memory saved, speed-up
-#        assets/convergence.gif                  Llama-3.2-1B, the losses step by step
 #     README.md : benchmarks/README.template.md with every {{key}} (or {{key:format}}) replaced by a number of this file (values()), and every claim of the text
 #     checked against the numbers first (claims()) : if one is false, README.md is NOT written.
 PEAK_TFLOPS = 197.0                                                                          # TPU v5e, bf16, one chip
@@ -318,6 +317,7 @@ def values():
         f, g = R["adamw_fused"], R["forge_bf16"]
         V[f"pool.{key}"], V[f"pool_saved.{key}"] = f["grads"] - g["grads"], f["peak"] - g["peak"]
         V[f"pool_pct.{key}"], V[f"act_per_weight.{key}"] = (f["peak"] - g["peak"]) / (f["grads"] - g["grads"]) * 100, f["activations"] / f["weights"]
+        V[f"pool_dA.{key}"] = g["activations"] - f["activations"]                             # the activations at the peak of FORGE, more than at the peak of fused AdamW
     V["qwen.forge_bf16_slower"] = -D["adamw"]["qwen"]["forge_bf16"]["dstep_best"]
     V["llama.int8_slower_best"] = -D["adamw"]["llama"]["forge_int8"]["dstep_best"]
     V["llama.int8_more_saved"] = D["adamw"]["llama"]["forge_bf16"]["peak"] - D["adamw"]["llama"]["forge_int8"]["peak"]
@@ -357,6 +357,9 @@ def claims(V, D, gaps, fails):
             (V["smoke.pass"] == V["smoke.methods"] > 0, "8 chips : every method agrees with one chip (smoke.md)"),
             (D["8b"]["forge_bf16"]["mfu"] < 10, "Llama-3.1-8B : the 8 chips reach less than 10% of their peak"),
             ([D["8b"][x]["settings"]["warmup"] for x in D["8b"]] == [10] * len(D["8b"]) and all(D["8b"][x]["settings"]["lr_warmup"] == 0 and D["8b"][x]["steps"] == 200 for x in D["8b"]), "Llama-3.1-8B : 200 steps, 10 not timed, no lr warmup"),
+            (all(abs(V[f"pool_saved.{k}"] - (V[f"pool.{k}"] - V[f"pool_dA.{k}"])) < 1e-3 for k in ("1b", "8b")), "saving against fused AdamW = G - dA (Llama-3.2-1B, Llama-3.1-8B)"),
+            (all(round(round(V[f"pool.{k}"], d) - round(V[f"pool_dA.{k}"], d), d) == round(V[f"pool_saved.{k}"], d) for k, d in (("1b", 4), ("8b", 1))), "the shown G - dA = saving is correct after rounding"),
+            (D["8b"]["forge_bf16"]["dmem_best"] > D["adamw"]["llama"]["forge_bf16"]["dmem_best"] > D["adamw"]["qwen"]["forge_bf16"]["dmem_best"], "against fused AdamW : 8B saves more than 1B, 1B more than Qwen"),
             (V["pool_pct.8b"] > V["pool_pct.1b"] and V["act_per_weight.8b"] < V["act_per_weight.1b"], "a larger model : more of the deleted gradient pool leaves the peak, activations are smaller next to the weights"),
             (a["mlp"]["forge_bf16"]["dstep_best"] > a["llama"]["forge_bf16"]["dstep_best"], "larger layers : a larger speed-up against fused AdamW (MLP against Llama-3.2-1B)")]
 
@@ -483,7 +486,6 @@ def main():
         headline(R, "adamw", os.path.join(ASSETS, f"{model}_headline.png"), f"(a) {title} : peak memory")
         rows.append((title, {"mem":   {c: pct(R[m]["peak"], R["adamw"]["peak"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R},
                              "speed": {c: x_(R[m]["step_ms"], R["adamw"]["step_ms"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R}}))
-        if model == "llama": gif(R, "adamw", f"{title}, one TPU v5e chip", os.path.join(ASSETS, "convergence.gif"))
     if rows: glance(rows, os.path.join(ASSETS, "glance.png"))
     R = big("adamw")
     if len(R) > 1: headline(R, "adamw", os.path.join(ASSETS, "llama8b_headline.png"), "(a) Llama-3.1-8B : one device (calculated)")
