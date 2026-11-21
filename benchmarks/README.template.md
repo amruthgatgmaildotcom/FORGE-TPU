@@ -20,8 +20,13 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 
 ## ✨ Highlights
 
-Each change is against vanilla PyTorch AdamW, then against fused AdamW, on the same TPU.
+Each number below is against vanilla PyTorch AdamW, then against fused AdamW, on the same TPU.
 
+- **A new FORGE for TPU, written from the start in Pallas, on a new software stack (`torch_tpu` 0.3).**
+  - **In place : `W` and the moments go to the kernel as donated HBM buffers. A check on the first launch warns if XLA copies them.**
+  - **Fast launch : the first launch of each layer shape is caught inside `torch_tpu` and replayed. The replay skips about 160 µs of checks for each layer; the launch itself takes about 21 µs (measured during development).**
+  - **int8 moments (one fp32 scale for each 64 rows), SGD and Muon, in the same kernel.**
+  - **Llama-3.1-8B on 8 chips : new tensor-parallel layers and a distributed Newton–Schulz for Muon. A check of a small Llama, 8 chips against one chip, passes for {{smoke.pass}} of {{smoke.methods}} methods.**
 - **Llama-3.1-8B, one device :** the peak memory decreases by **{{8b.forge_bf16.dmem:.0f}}%** ({{8b.adamw.peak:.1f}} → {{8b.forge_bf16.peak:.1f}} GiB) and by **{{8b.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{8b.forge_bf16.dmem_best:.0f}}%, −{{8b.forge_int8.dmem_best:.0f}}% with int8 moments. [More details](#-llama-31-8b-tpu-v5e-8).
 - **Less memory :** FORGE decreases the peak memory on each model.
   - Llama-3.2-1B : **−{{llama.forge_bf16.dmem:.0f}}%** ({{llama.adamw.peak:.2f}} → {{llama.forge_bf16.peak:.2f}} GiB), **−{{llama.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{llama.forge_bf16.dmem_best:.0f}}%, −{{llama.forge_int8.dmem_best:.0f}}%.
@@ -32,21 +37,22 @@ Each change is against vanilla PyTorch AdamW, then against fused AdamW, on the s
   - MLP-1.1B : **−{{mlp.forge_bf16.dstep:.0f}}%** ({{mlp.adamw.step_ms:.1f}} → {{mlp.forge_bf16.step_ms:.1f}} ms). Against fused AdamW : −{{mlp.forge_bf16.dstep_best:.0f}}%. The chip runs at **{{mlp.forge_bf16.mfu:.0f}}%** of its bf16 peak (model FLOPs).
   - Optimizer step, Llama-3.2-1B : **−{{llama.opt_cut:.0f}}%** ({{prof.llama.adamw.opt:.1f}} → {{prof.llama.forge_bf16.opt:.1f}} ms). Against fused AdamW : −{{llama.opt_cut_best:.0f}}%.
   - Muon, against standard Muon : **−{{muon.llama.forge_muon.dstep:.0f}}%** on Llama-3.2-1B.
-- **The main limit is the HBM, not FORGE.** One TPU v5e chip has only 16 GiB of HBM. [See below](#%EF%B8%8F-the-main-limit--16-gib-of-hbm).
+- **The main limit is the HBM.** One TPU v5e chip has only 16 GiB of HBM. [See below](#%EF%B8%8F-the-main-limit--16-gib-of-hbm).
 
 ## ⚠️ The main limit : 16 GiB of HBM
 
 The largest disadvantage of this work is the small HBM of one TPU v5e chip (16 GiB). In these results, FORGE gives the most improvement on large layers and on large models. Llama-3.1-8B does not fit on one chip.
 
 - **Large layers make FORGE faster.** Against fused AdamW, the step time decreases by {{mlp.forge_bf16.dstep_best:.0f}}% on the MLP-1.1B (large layers, 4096 tokens per step) and by {{llama.forge_bf16.dstep_best:.0f}}% on Llama-3.2-1B (smaller layers, 512 tokens per step).
-- **Large models make FORGE save more memory.** FORGE deletes the weight gradient. On Llama-3.2-1B, the peak decreases by {{pool_pct.1b:.0f}}% of the deleted gradient ({{pool_saved.1b:.2f}} of {{pool.1b:.2f}} GiB). On Llama-3.1-8B (calculated), it decreases by {{pool_pct.8b:.0f}}% ({{pool_saved.8b:.1f}} of {{pool.8b:.1f}} GiB).
-- **On 16 GiB, a large model must be split.** Llama-3.1-8B needs 8 chips. Each chip holds 1/8 of each layer, and the chips must communicate. In this run, the 8 chips reach only {{8b.forge_bf16.mfu:.0f}}% of their peak.
-
-With more HBM, a large model fits on one chip. There, we expect much larger improvements in memory and time. This is not measured yet.
+- **Large models make FORGE save more memory.** Against fused AdamW, FORGE saves G − ΔA. G is the weight gradient that FORGE deletes. ΔA is the activations that are in memory at the peak of FORGE but not at the peak of fused AdamW. For the same number of tokens, a larger model has a larger G, but its activations stay small :
+  - Llama-3.1-8B (calculated) : {{pool.8b:.1f}} − {{pool_dA.8b:.1f}} = {{pool_saved.8b:.1f}} GiB saved, the peak decreases from {{8b.adamw_fused.peak:.1f}} to {{8b.forge_bf16.peak:.1f}} GiB (−{{8b.forge_bf16.dmem_best:.0f}}%).
+  - Llama-3.2-1B : {{pool.1b:.4f}} − {{pool_dA.1b:.4f}} = {{pool_saved.1b:.4f}} GiB saved (−{{llama.forge_bf16.dmem_best:.0f}}%).
+  - Qwen3-0.6B : −{{qwen.forge_bf16.dmem_best:.1f}}% only ([see why](#-every-model)).
+- **8 chips :** I could not make the 8 chips of a Kaggle TPU v5e-8 work efficiently in the available time. The Llama-3.1-8B results below are the results of that run.
 
 ## 🦙 Llama-3.1-8B (TPU v5e-8)
 
-Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up, and a Kaggle TPU v5e-8 has a waiting time of 30 to 40 hours. Thus there is only one configuration : batch 1, sequence {{seq_8b}}, one seed, 200 steps (the first 10 not timed, no lr warmup). The code is `benchmarks/kaggle/`. These numbers come from an earlier version of `src/`. A new run with the current `src/` can give different numbers.
+Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. This run was difficult to set up, and a Kaggle TPU v5e-8 has a waiting time of 30 to 40 hours. Thus there is only one configuration : batch 1, sequence {{seq_8b}}, one seed, 200 steps (the first 10 not timed, no lr warmup). The code is `benchmarks/kaggle/`. These numbers come from a slightly earlier version of `src/`. A new run with the current `src/` can give different numbers.
 
 <div align="center">
 <img src="assets/llama8b_headline.png" width="94%" alt="Llama-3.1-8B : peak memory of one device (calculated) and memory vs. speed">
@@ -96,13 +102,19 @@ Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. 
 
 {{table.profile}}
 
-## 📉 Convergence parity
+## 📉 Convergence
 
 <div align="center">
-<img src="assets/convergence.gif" width="78%" alt="FORGE follows PyTorch AdamW on Llama-3.2-1B">
+<img src="assets/convergence.png" width="96%" alt="The training loss of each step, each AdamW method, three models">
 </div>
 
-Final loss : the mean over the last 10% of the steps that all methods ran, and over the 2 seeds.
+Each curve is the loss of each step : the mean of 2 seeds, without smoothing. Each model trains on 8 fixed batches.
+
+- **FORGE (bf16) follows PyTorch.** The mean distance between its loss and the loss of fused AdamW, step by step : {{conv.mlp.forge_bf16:.4f}} (MLP-1.1B), {{conv.llama.forge_bf16:.4f}} (Llama-3.2-1B), {{conv.qwen.forge_bf16:.3f}} (Qwen3-0.6B). For vanilla AdamW it is {{conv.mlp.adamw:.4f}}, {{conv.llama.adamw:.4f}} and {{conv.qwen.adamw:.3f}}.
+- **int8 moments converge more slowly.** The loss reaches the middle of its decrease (on the log scale of the figure) at step {{conv.mlp.below_half_int8}} instead of {{conv.mlp.below_half_bf16}} on the MLP-1.1B, and at step {{conv.llama.below_half_int8}} instead of {{conv.llama.below_half_bf16}} on Llama-3.2-1B. The final loss is also higher.
+- **Qwen3-0.6B does not converge in these steps.** Each method has loss spikes, and each method stops near 6.0.
+
+The final loss is the mean over the last 10% of the steps that all methods ran, and over the 2 seeds :
 
 {{table.loss}}
 
