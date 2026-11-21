@@ -25,8 +25,6 @@ Each number below is against vanilla PyTorch AdamW, then against fused AdamW, on
 - **A new FORGE for TPU, written from the start in Pallas, on a new software stack (`torch_tpu` 0.3).**
   - **In place : `W` and the moments go to the kernel as donated HBM buffers. A check on the first launch warns if XLA copies them.**
   - **Fast launch : the first launch of each layer shape is caught inside `torch_tpu` and replayed. The replay skips about 160 µs of checks for each layer; the launch itself takes about 21 µs (measured during development).**
-  - **int8 moments (one fp32 scale for each 64 rows), SGD and Muon, in the same kernel.**
-  - **Llama-3.1-8B on 8 chips : new tensor-parallel layers and a distributed Newton–Schulz for Muon. A check of a small Llama, 8 chips against one chip, passes for {{smoke.pass}} of {{smoke.methods}} methods.**
 - **Llama-3.1-8B, one device :** the peak memory decreases by **{{8b.forge_bf16.dmem:.0f}}%** ({{8b.adamw.peak:.1f}} → {{8b.forge_bf16.peak:.1f}} GiB) and by **{{8b.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{8b.forge_bf16.dmem_best:.0f}}%, −{{8b.forge_int8.dmem_best:.0f}}% with int8 moments. [More details](#-llama-31-8b-tpu-v5e-8).
 - **Less memory :** FORGE decreases the peak memory on each model.
   - Llama-3.2-1B : **−{{llama.forge_bf16.dmem:.0f}}%** ({{llama.adamw.peak:.2f}} → {{llama.forge_bf16.peak:.2f}} GiB), **−{{llama.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{llama.forge_bf16.dmem_best:.0f}}%, −{{llama.forge_int8.dmem_best:.0f}}%.
@@ -136,3 +134,9 @@ On Qwen3-0.6B the peak decreases by only {{muon.qwen.forge_muon.dmem:.1f}}%, for
 - **In place.** `W` and the moments go to the kernel as donated buffers (`input_output_aliases`). The kernel writes the new values into the same HBM. It calculates `dx = ΔY·W` first, with the old `W`.
 - **Optimizers.** AdamW (bf16 or int8 moments), SGD and Muon use the same kernel (`src/forge_tpu/kernel/`). PyTorch's fused AdamW updates the embeddings, the tied head and the norms.
 - **Reproduce.** Paste `benchmarks/colab_cell.py` into one Colab cell (TPU v5e-1) and upload the repository zip. `benchmarks/report.py` writes all tables (`results/summary.md`), figures (`assets/`) and numbers of this README from `results/`. For Llama-3.1-8B : `benchmarks/kaggle/kaggle_cell.py` on a Kaggle TPU v5e-8 (see `benchmarks/kaggle/README.md`).
+
+## ✅ Correctness
+
+`benchmarks/tests.py` compares FORGE with `torch.optim.AdamW` (fp32, on the CPU) : **{{tests.pass}} of {{tests.total}} checks pass** ([report](results/adamw/tests.md)). The {{tests.fails}} other checks are expected. None of them is an error in the FORGE (bf16) update :
+- **{{tests.int8_fails}} int8 checks.** int8 moments are approximate by design. {{tests.int8_ulp}} of these checks use the tolerance of exact bf16 values (1 ulp). One is the `v` moment with very small gradients (× 10⁻⁶), where int8 loses precision. One is a small Llama trained with int8 moments : its loss differs from the fp32 reference by up to {{tests.int8_model_err:.3f}}, against a tolerance of {{tests.int8_model_tol:.3f}} (2 × the error of PyTorch bf16).
+- **1 bias check.** The bias gradient `db` has an error of {{tests.db_err:.4f}} against a tolerance of {{tests.db_tol:.3f}}. It is a bf16 sum, and FORGE does not update the bias.

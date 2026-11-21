@@ -347,6 +347,12 @@ def values():
     rows = [l for l in t if l.startswith("|") and ("PASS" in l or "FAIL" in l)]
     fails = [l for l in rows if "**FAIL**" in l]
     V.update({"tests.total": len(rows), "tests.pass": len(rows) - len(fails), "tests.fails": len(fails), "tests.int8_fails": sum("int8" in l for l in fails)})
+    db = [l.strip().strip("|").split(" | ") for l in fails if "| db |" in l]
+    V["tests.db_err"], V["tests.db_tol"] = (float(db[0][2]), float(db[0][3])) if db else (0.0, 0.0)
+    i8 = [l.strip().strip("|").split(" | ") for l in fails if "int8" in l]
+    V["tests.int8_ulp"] = sum("ulp" in c[1] for c in i8)
+    model = [c for c in i8 if c[0].strip().startswith("model")]
+    V["tests.int8_model_err"], V["tests.int8_model_tol"] = (float(model[0][-3]), float(model[0][-2])) if model else (0.0, 0.0)
     return V, D, gaps, fails
 
 
@@ -372,6 +378,9 @@ def claims(V, D, gaps, fails):
             (m["llama"]["forge_muon"]["peak"] < m["llama"]["muon"]["peak"] and m["llama"]["forge_muon"]["step_ms"] < m["llama"]["muon"]["step_ms"], "Llama-3.2-1B : FORGE (Muon) is faster AND smaller than Muon"),
             (all(g <= f + 1e-4 for g, f in gaps.values()), "every model : the FORGE (bf16) final loss is never further from vanilla AdamW than fused AdamW's"),
             (all("int8" in l or "| db |" in l for l in fails), "tests : every fail is an int8 case or the bias gradient db"),
+            (V["tests.int8_ulp"] + 2 == V["tests.int8_fails"] and sum("int8" in l and "| v |" in l and "x1e-06" in l for l in fails) == 1 and V["tests.int8_model_err"] > 0, "tests : the int8 fails are the ulp checks, one v with gradients x 1e-6, one model"),
+            (V["tests.int8_fails"] + sum("| db |" in l for l in fails) == V["tests.fails"] and sum("| db |" in l for l in fails) == 1, "tests : the fails are the int8 ones and one db"),
+            (max(float(l.strip().strip("|").split(" | ")[2]) for l in fails if "int8" in l and "x1e-06" in l) == max(float(l.strip().strip("|").split(" | ")[2]) for l in fails if "int8" in l), "tests : the largest int8 error is with the gradients x 1e-6"),
             (all(r["dmem"] > 0 for k in a for x, r in a[k].items() if x.startswith("forge")) and all(r["dmem"] > 0 for k in m for x, r in m[k].items() if x.startswith("forge")), "every model : FORGE has less peak memory than vanilla torch"),
             (all(a[k][x]["dstep"] > 0 for k in a for x in ("forge_bf16", "forge_int8")) and all(a[k]["forge_bf16"]["dstep_best"] > 0 for k in a if k != "qwen"), "one chip : FORGE is faster than vanilla AdamW on each model, and faster than fused AdamW except on Qwen3-0.6B"),
             (V["smoke.pass"] == V["smoke.methods"] > 0, "8 chips : every method agrees with one chip (smoke.md)"),

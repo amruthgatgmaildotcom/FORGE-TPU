@@ -177,3 +177,9 @@ On Qwen3-0.6B the peak decreases by only 0.2%, for the same cause as with AdamW.
 - **In place.** `W` and the moments go to the kernel as donated buffers (`input_output_aliases`). The kernel writes the new values into the same HBM. It calculates `dx = ΔY·W` first, with the old `W`.
 - **Optimizers.** AdamW (bf16 or int8 moments), SGD and Muon use the same kernel (`src/forge_tpu/kernel/`). PyTorch's fused AdamW updates the embeddings, the tied head and the norms.
 - **Reproduce.** Paste `benchmarks/colab_cell.py` into one Colab cell (TPU v5e-1) and upload the repository zip. `benchmarks/report.py` writes all tables (`results/summary.md`), figures (`assets/`) and numbers of this README from `results/`. For Llama-3.1-8B : `benchmarks/kaggle/kaggle_cell.py` on a Kaggle TPU v5e-8 (see `benchmarks/kaggle/README.md`).
+
+## ✅ Correctness
+
+`benchmarks/tests.py` compares FORGE with `torch.optim.AdamW` (fp32, on the CPU) : **153 of 160 checks pass** ([report](results/adamw/tests.md)). The 7 other checks are expected. None of them is an error in the FORGE (bf16) update :
+- **6 int8 checks.** int8 moments are approximate by design. 4 of these checks use the tolerance of exact bf16 values (1 ulp). One is the `v` moment with very small gradients (× 10⁻⁶), where int8 loses precision. One is a small Llama trained with int8 moments : its loss differs from the fp32 reference by up to 0.447, against a tolerance of 0.437 (2 × the error of PyTorch bf16).
+- **1 bias check.** The bias gradient `db` has an error of 0.0064 against a tolerance of 0.005. It is a bf16 sum, and FORGE does not update the bias.
