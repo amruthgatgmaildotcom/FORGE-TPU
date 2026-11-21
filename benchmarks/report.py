@@ -10,6 +10,7 @@ from config import METHODS, BEST, LABELS, MODELS, ROOT, RESULTS, ASSETS, run_pat
 #        assets/<model>_headline.png             AdamW : peak memory, split in weights / optimizer states / activations / weight gradient, and memory vs. speed
 #        assets/llama8b_headline.png             the same for Llama-3.1-8B on 8 chips, memory of one device (calculated)
 #        assets/glance.png                       every model at once against vanilla AdamW : memory saved, speed-up
+#        assets/convergence.png                  the loss of every step (no smoothing), every AdamW method, one panel per model
 #     README.md : benchmarks/README.template.md with every {{key}} (or {{key:format}}) replaced by a number of this file (values()), and every claim of the text
 #     checked against the numbers first (claims()) : if one is false, README.md is NOT written.
 PEAK_TFLOPS = 197.0                                                                          # TPU v5e, bf16, one chip
@@ -175,6 +176,18 @@ def glance(rows, path):
     a.legend(fontsize = 10.5, loc = "lower right")
     fig.tight_layout(); fig.savefig(path, dpi = 160); plt.close(fig)
 
+def convergence(models, path):
+    # the loss of every step (the mean over the seeds, no smoothing), every AdamW method, one panel per model. Log scale : the end of the run is visible too
+    plt = plt_()
+    fig, axes = plt.subplots(1, len(models), figsize = (5.2 * len(models), 4.2))
+    for ax, (title, R) in zip(axes, models):
+        n = min(r["steps"] for r in R.values())
+        for m in ("forge_int8", "forge_bf16", "adamw_fused", "adamw"):                         # the torch curves last (dashed, dotted) : they stay visible on top of FORGE
+            if m in R: ax.plot(range(1, n + 1), R[m]["losses"][:n], color = LINE[m][0], ls = LINE[m][1], lw = 1.6 if m == "forge_bf16" else 1.1, label = LABELS[m])
+        ax.set_yscale("log"); ax.set_title(f"{title} ({R['adamw']['seeds']} seeds, mean)", fontsize = 12); ax.set_xlabel("training step"); ax.grid(alpha = 0.35, which = "both")
+    axes[0].set_ylabel("training loss (log scale)"); axes[0].legend(fontsize = 9)
+    fig.tight_layout(); fig.savefig(path, dpi = 150); plt.close(fig)
+
 def gif(R, optim, title, path, frames = 50):
     # the convergence animation : the smoothed losses grow step by step, the raw losses behind them
     plt = plt_()
@@ -319,6 +332,13 @@ def values():
         V[f"pool_pct.{key}"], V[f"act_per_weight.{key}"] = (f["peak"] - g["peak"]) / (f["grads"] - g["grads"]) * 100, f["activations"] / f["weights"]
         V[f"pool_dA.{key}"] = g["activations"] - f["activations"]                             # the activations at the peak of FORGE, more than at the peak of fused AdamW
     V["qwen.forge_bf16_slower"] = -D["adamw"]["qwen"]["forge_bf16"]["dstep_best"]
+    for k, R in D["adamw"].items():                                                          # convergence : the mean distance of the loss of each step to fused AdamW
+        n = min(r["steps"] for r in R.values())
+        for m in ("adamw", "forge_bf16", "forge_int8"):
+            V[f"conv.{k}.{m}"] = statistics.mean(abs(x - y) for x, y in zip(R[m]["losses"][:n], R["adamw_fused"]["losses"][:n]))
+        mid = (R["adamw_fused"]["losses"][0] * R["adamw_fused"]["loss"]) ** 0.5                # the middle of the decrease on a log scale : sqrt(first loss x final loss of fused AdamW)
+        V[f"conv.{k}.mid"] = mid
+        V[f"conv.{k}.below_half_bf16"], V[f"conv.{k}.below_half_int8"] = (next(i for i, x in enumerate(R[m]["losses"]) if x < mid) + 1 for m in ("forge_bf16", "forge_int8"))
     V["llama.int8_slower_best"] = -D["adamw"]["llama"]["forge_int8"]["dstep_best"]
     V["llama.int8_more_saved"] = D["adamw"]["llama"]["forge_bf16"]["peak"] - D["adamw"]["llama"]["forge_int8"]["peak"]
     gaps = {k: (abs(D["adamw"][k]["forge_bf16"]["loss"] - D["adamw"][k]["adamw"]["loss"]), abs(D["adamw"][k]["adamw_fused"]["loss"] - D["adamw"][k]["adamw"]["loss"])) for k in D["adamw"]}
@@ -359,6 +379,10 @@ def claims(V, D, gaps, fails):
             ([D["8b"][x]["settings"]["warmup"] for x in D["8b"]] == [10] * len(D["8b"]) and all(D["8b"][x]["settings"]["lr_warmup"] == 0 and D["8b"][x]["steps"] == 200 for x in D["8b"]), "Llama-3.1-8B : 200 steps, 10 not timed, no lr warmup"),
             (all(abs(V[f"pool_saved.{k}"] - (V[f"pool.{k}"] - V[f"pool_dA.{k}"])) < 1e-3 for k in ("1b", "8b")), "saving against fused AdamW = G - dA (Llama-3.2-1B, Llama-3.1-8B)"),
             (all(round(round(V[f"pool.{k}"], d) - round(V[f"pool_dA.{k}"], d), d) == round(V[f"pool_saved.{k}"], d) for k, d in (("1b", 4), ("8b", 1))), "the shown G - dA = saving is correct after rounding"),
+            (all(V[f"conv.{k}.forge_bf16"] <= V[f"conv.{k}.adamw"] + 1e-4 for k in D["adamw"]), "convergence : FORGE (bf16) is not further from fused AdamW than vanilla AdamW, each model"),
+            (all(D["adamw"][k]["forge_int8"]["loss"] > D["adamw"][k]["forge_bf16"]["loss"] and V[f"conv.{k}.below_half_int8"] > V[f"conv.{k}.below_half_bf16"] for k in ("mlp", "llama")), "convergence : int8 converges more slowly (MLP, Llama-3.2-1B)"),
+            (all(5.9 < D["adamw"]["qwen"][m]["loss"] < 6.1 for m in D["adamw"]["qwen"]), "convergence : every Qwen3-0.6B method ends near 6"),
+            (all(max(b - a for a, b in zip(R["losses"][49:], R["losses"][50:])) > 1 for R in D["adamw"]["qwen"].values()), "convergence : every Qwen3-0.6B method has a loss spike (> 1) after step 50"),
             (D["8b"]["forge_bf16"]["dmem_best"] > D["adamw"]["llama"]["forge_bf16"]["dmem_best"] > D["adamw"]["qwen"]["forge_bf16"]["dmem_best"], "against fused AdamW : 8B saves more than 1B, 1B more than Qwen"),
             (V["pool_pct.8b"] > V["pool_pct.1b"] and V["act_per_weight.8b"] < V["act_per_weight.1b"], "a larger model : more of the deleted gradient pool leaves the peak, activations are smaller next to the weights"),
             (a["mlp"]["forge_bf16"]["dstep_best"] > a["llama"]["forge_bf16"]["dstep_best"], "larger layers : a larger speed-up against fused AdamW (MLP against Llama-3.2-1B)")]
@@ -487,6 +511,7 @@ def main():
         rows.append((title, {"mem":   {c: pct(R[m]["peak"], R["adamw"]["peak"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R},
                              "speed": {c: x_(R[m]["step_ms"], R["adamw"]["step_ms"]) for c, m in (("f", "adamw_fused"), ("g", "forge_bf16"), ("i", "forge_int8")) if m in R}}))
     if rows: glance(rows, os.path.join(ASSETS, "glance.png"))
+    convergence([(title, load("adamw", model)) for model, title in MODELS.items() if len(load("adamw", model)) > 1], os.path.join(ASSETS, "convergence.png"))
     R = big("adamw")
     if len(R) > 1: headline(R, "adamw", os.path.join(ASSETS, "llama8b_headline.png"), "(a) Llama-3.1-8B : one device (calculated)")
     summary()

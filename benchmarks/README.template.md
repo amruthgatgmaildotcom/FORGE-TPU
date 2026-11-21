@@ -22,9 +22,9 @@ FORGE puts the optimizer step into the backward pass. One Pallas kernel calculat
 
 Each number below is against vanilla PyTorch AdamW, then against fused AdamW, on the same TPU.
 
-- **A new FORGE for TPU, written from the start in Pallas, on a stack with almost no documentation (`torch_tpu` 0.3).**
+- **A new FORGE for TPU, written from the start in Pallas, on a new software stack (`torch_tpu` 0.3).**
   - **In place : `W` and the moments go to the kernel as donated HBM buffers. A check on the first launch warns if XLA copies them.**
-  - **Fast launch : the first launch of each layer shape is caught inside `torch_tpu` and replayed. The replay skips about 160 µs of checks for each layer (the launch itself takes about 21 µs).**
+  - **Fast launch : the first launch of each layer shape is caught inside `torch_tpu` and replayed. The replay skips about 160 µs of checks for each layer; the launch itself takes about 21 µs (measured during development).**
   - **int8 moments (one fp32 scale for each 64 rows), SGD and Muon, in the same kernel.**
   - **Llama-3.1-8B on 8 chips : new tensor-parallel layers and a distributed Newton–Schulz for Muon. A check of a small Llama, 8 chips against one chip, passes for {{smoke.pass}} of {{smoke.methods}} methods.**
 - **Llama-3.1-8B, one device :** the peak memory decreases by **{{8b.forge_bf16.dmem:.0f}}%** ({{8b.adamw.peak:.1f}} → {{8b.forge_bf16.peak:.1f}} GiB) and by **{{8b.forge_int8.dmem:.0f}}%** with int8 moments. Against fused AdamW : −{{8b.forge_bf16.dmem_best:.0f}}%, −{{8b.forge_int8.dmem_best:.0f}}% with int8 moments. [More details](#-llama-31-8b-tpu-v5e-8).
@@ -37,7 +37,7 @@ Each number below is against vanilla PyTorch AdamW, then against fused AdamW, on
   - MLP-1.1B : **−{{mlp.forge_bf16.dstep:.0f}}%** ({{mlp.adamw.step_ms:.1f}} → {{mlp.forge_bf16.step_ms:.1f}} ms). Against fused AdamW : −{{mlp.forge_bf16.dstep_best:.0f}}%. The chip runs at **{{mlp.forge_bf16.mfu:.0f}}%** of its bf16 peak (model FLOPs).
   - Optimizer step, Llama-3.2-1B : **−{{llama.opt_cut:.0f}}%** ({{prof.llama.adamw.opt:.1f}} → {{prof.llama.forge_bf16.opt:.1f}} ms). Against fused AdamW : −{{llama.opt_cut_best:.0f}}%.
   - Muon, against standard Muon : **−{{muon.llama.forge_muon.dstep:.0f}}%** on Llama-3.2-1B.
-- **The main limit is the HBM, not FORGE.** One TPU v5e chip has only 16 GiB of HBM. [See below](#%EF%B8%8F-the-main-limit--16-gib-of-hbm).
+- **The main limit is the HBM.** One TPU v5e chip has only 16 GiB of HBM. [See below](#%EF%B8%8F-the-main-limit--16-gib-of-hbm).
 
 ## ⚠️ The main limit : 16 GiB of HBM
 
@@ -101,6 +101,22 @@ Llama-3.1-8B ran on the 8 chips of a Kaggle TPU v5e-8, with tensor parallelism. 
 `benchmarks/profiling.py`, seed 0, median of 20 steps, ms. Forward, backward, optimizer step : a sync after each phase. Step, as trained : one sync at the end, as in the benchmark.
 
 {{table.profile}}
+
+## 📉 Convergence
+
+<div align="center">
+<img src="assets/convergence.png" width="96%" alt="The training loss of each step, each AdamW method, three models">
+</div>
+
+Each curve is the loss of each step : the mean of 2 seeds, without smoothing. Each model trains on 8 fixed batches.
+
+- **FORGE (bf16) follows PyTorch.** The mean distance between its loss and the loss of fused AdamW, step by step : {{conv.mlp.forge_bf16:.4f}} (MLP-1.1B), {{conv.llama.forge_bf16:.4f}} (Llama-3.2-1B), {{conv.qwen.forge_bf16:.3f}} (Qwen3-0.6B). For vanilla AdamW it is {{conv.mlp.adamw:.4f}}, {{conv.llama.adamw:.4f}} and {{conv.qwen.adamw:.3f}}.
+- **int8 moments converge more slowly.** The loss reaches the middle of its decrease (on the log scale of the figure) at step {{conv.mlp.below_half_int8}} instead of {{conv.mlp.below_half_bf16}} on the MLP-1.1B, and at step {{conv.llama.below_half_int8}} instead of {{conv.llama.below_half_bf16}} on Llama-3.2-1B. The final loss is also higher.
+- **Qwen3-0.6B does not converge in these steps.** Each method has loss spikes, and each method stops near 6.0.
+
+The final loss is the mean over the last 10% of the steps that all methods ran, and over the 2 seeds :
+
+{{table.loss}}
 
 ## 🌀 Muon
 
